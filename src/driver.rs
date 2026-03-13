@@ -223,6 +223,10 @@ where
     fn read_rx_state(&self) -> bool {
         self.rx.is_high().unwrap_or(false)
     }
+
+    pub fn is_idle(&self) -> bool {
+        return self.mode == OokMode::Idle;
+    }
 }
 
 #[cfg(test)]
