@@ -1,4 +1,6 @@
-use crate::consts::{MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, PREAMBLE, PREAMBLE_SIZE};
+use crate::consts::{
+    MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, MESSAGE_START_BYTE, PREAMBLE, PREAMBLE_SIZE,
+};
 use embedded_hal::digital::v2::{InputPin, OutputPin, PinState};
 use heapless::Vec;
 
@@ -25,6 +27,11 @@ where
     // Receiver fields
     pub rx: RX,
     rx_buf: Vec<u8, MAX_BUFFER_SIZE>,
+    rx_byte: u8,
+    rx_bit_index: usize,
+    rx_message_length: u8,
+    rx_message_received: bool,
+    rx_message_started: bool,
 
     // Misc
     mode: OokMode,
@@ -48,6 +55,11 @@ where
 
             rx,
             rx_buf: Vec::new(),
+            rx_byte: 0,
+            rx_bit_index: 0,
+            rx_message_length: 0,
+            rx_message_received: false,
+            rx_message_started: false,
 
             mode: OokMode::Idle,
         }
@@ -56,7 +68,9 @@ where
     /// Depending on the current mode receive, transmit data or do nothing
     pub fn tick(&mut self) {
         match self.mode {
-            OokMode::Receive => {}
+            OokMode::Receive => {
+                self.receive();
+            }
             OokMode::Transmit => {
                 self.transmit();
             }
@@ -127,11 +141,76 @@ where
 
     // ===== RECEIVING =====
 
-    pub fn receiver_available(&self) -> bool {
-        self.mode == OokMode::Idle
+    /// Cleanup before reading into the `rx_buffer`
+    fn start_receiving(&mut self) {
+        self.mode = OokMode::Receive;
+        self.rx_message_received = false;
+        self.rx_message_length = 0;
+        self.rx_buf.clear();
     }
 
-    // pub fn receive(&mut self) -> Result<&[u8], ReceiverError> {}
+    /// Check if receiver is available, if so, primes it for receiving data
+    pub fn receiver_available(&mut self) -> bool {
+        if self.mode == OokMode::Idle {
+            self.start_receiving();
+        }
+
+        self.mode == OokMode::Receive
+    }
+
+    /// Checks if message is ready to be read.\
+    /// Returns reference to `rx_buf`
+    pub fn get_message(&mut self) -> Result<&[u8], ReceiverError> {
+        if self.rx_message_received {
+            return Ok(&self.rx_buf);
+        }
+
+        Err(ReceiverError::MessageNotReady)
+    }
+
+    /// Receive bit from `rx` and put it into `rx_buf`
+    fn receive(&mut self) {
+        if !self.rx_message_started {
+            // Push bit onto byte
+            // This way its possible to detect start byte
+            self.rx_byte >>= 1;
+            self.rx_byte |= (self.read_rx_state() as u8) << 7;
+
+            // Check if message start byte reached
+            if self.rx_byte == MESSAGE_START_BYTE {
+                self.rx_message_started = true;
+                self.rx_buf.push(self.rx_byte).unwrap();
+                self.rx_byte = 0;
+            }
+
+            return;
+        }
+
+        // Append bit to byte
+        self.rx_byte |= (self.read_rx_state() as u8) << (self.rx_bit_index);
+        self.rx_bit_index += 1;
+
+        // Full byte
+        if self.rx_bit_index >= 8 {
+            self.rx_bit_index = 0;
+
+            // Message length not set up yet
+            if self.rx_message_length == 0 {
+                self.rx_message_length = self.rx_byte;
+            }
+
+            self.rx_buf.push(self.rx_byte).unwrap();
+            self.rx_byte = 0;
+
+            // Message end reached or message wouldn't fit and gets truncated
+            if self.rx_buf.len() >= self.rx_message_length as usize + PREAMBLE_SIZE
+                || self.rx_buf.len() >= MAX_MESSAGE_LENGTH
+            {
+                self.rx_message_received = true;
+                self.mode = OokMode::Idle
+            }
+        }
+    }
 
     // ===== MISC =====
 
@@ -212,6 +291,38 @@ mod tests {
 
         assert!(&transmitted_data[PREAMBLE_SIZE..] == data);
         assert!(&transmitted_data[PREAMBLE_SIZE - 1] == &(n_bytes_sent as u8));
+    }
+
+    #[test]
+    fn receiver_test() {
+        let mut transmitter = OokDriver::new(MockPin::new(), MockPin::new());
+        let mut receiver = OokDriver::new(MockPin::new(), MockPin::new());
+
+        let data = b"Hello there!";
+
+        let n_bytes = transmitter.send(data);
+
+        // Prime receiver
+        receiver.receiver_available();
+
+        let msg = loop {
+            // Return if message ready
+            if let Ok(msg) = receiver.get_message() {
+                break msg;
+            }
+
+            transmitter.tick();
+            // Sync state on receiver's rx pin and transmitter's tx pin
+            receiver.rx.sync_with(&transmitter.tx);
+            receiver.tick();
+        };
+
+        // Check for preambule
+        assert!(msg[0] == MESSAGE_START_BYTE);
+        // Check if length matches
+        assert!(msg[PREAMBLE_SIZE - 1] as usize == n_bytes);
+        // Check if data was transmitted successfully
+        assert!(&msg[PREAMBLE_SIZE..] == data);
     }
 }
 

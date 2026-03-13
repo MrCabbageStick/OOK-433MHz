@@ -14,6 +14,10 @@ impl MockPin {
     pub fn with_state(state: bool) -> Self {
         Self { state }
     }
+
+    pub fn sync_with(&mut self, other: &dyn InputPin<Error = Infallible>) {
+        self.state = other.is_high().unwrap();
+    }
 }
 
 impl OutputPin for MockPin {
@@ -38,6 +42,6 @@ impl InputPin for MockPin {
     }
 
     fn is_low(&self) -> Result<bool, Self::Error> {
-        Ok(self.state)
+        Ok(!self.state)
     }
 }
