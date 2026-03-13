@@ -1,4 +1,4 @@
-use crate::consts::{MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, PREAMBLE_SIZE};
+use crate::consts::{MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, PREAMBLE, PREAMBLE_SIZE};
 use embedded_hal::digital::v2::{InputPin, OutputPin, PinState};
 use heapless::Vec;
 
@@ -22,7 +22,7 @@ where
     /// Index of bit in byte of `tx_buf`
     tx_bit_index: u8,
 
-    // Receiver stuff
+    // Receiver fields
     pub rx: RX,
     rx_buf: Vec<u8, MAX_BUFFER_SIZE>,
 
@@ -36,9 +36,13 @@ where
     RX: InputPin,
 {
     pub fn new(tx: TX, rx: RX) -> Self {
+        // Insert preamble into tx_buf, it should stay there forever
+        let tx_buf = Vec::from_slice(&PREAMBLE)
+            .expect("Unable to fit preamble into tx_buf, MAX_BUFFER_SIZE might be smaller than PREAMBLE_SIZE");
+
         Self {
             tx,
-            tx_buf: Vec::new(),
+            tx_buf,
             tx_bit_index: 0,
             tx_buf_index: 0,
 
@@ -60,11 +64,14 @@ where
         }
     }
 
+    // ===== TRANSMISSION =====
+
     /// Cleanup after transmission is finished
     fn end_transmission(&mut self) {
         self.tx_bit_index = 0;
         self.tx_buf_index = 0;
         self.mode = OokMode::Idle;
+        self.set_tx_state(false);
     }
 
     /// Transmits next bit\
@@ -107,6 +114,10 @@ where
             bytes
         };
 
+        self.tx_buf
+            .push(safe_bytes.len() as u8)
+            .expect("Unable to push message length into tx_buf");
+
         self.tx_buf.extend(safe_bytes.iter().copied());
 
         self.mode = OokMode::Transmit;
@@ -114,9 +125,24 @@ where
         safe_bytes.len()
     }
 
+    // ===== RECEIVING =====
+
+    pub fn receiver_available(&self) -> bool {
+        self.mode == OokMode::Idle
+    }
+
+    // pub fn receive(&mut self) -> Result<&[u8], ReceiverError> {}
+
+    // ===== MISC =====
+
     /// Helper function if I were to add support for swapped hight and low  
     fn set_tx_state(&mut self, state: bool) {
         let _ = self.tx.set_state(PinState::from(state));
+    }
+
+    /// Helper function if I were to add support for swapped hight and low  
+    fn read_rx_state(&self) -> bool {
+        self.rx.is_high().unwrap_or(false)
     }
 }
 
@@ -181,6 +207,10 @@ mod tests {
             }
         }
 
-        assert!(transmitted_data.as_slice() == data);
+        assert!(&transmitted_data[PREAMBLE_SIZE..] == data);
     }
+}
+
+pub enum ReceiverError {
+    MessageNotReady,
 }
