@@ -164,6 +164,9 @@ mod tests {
         assert!(n_sent_bytes == data.len());
         assert!(driver.mode == OokMode::Transmit);
         assert!(&driver.tx_buf[PREAMBLE_SIZE..PREAMBLE_SIZE + data.len()] == data);
+
+        let data_size = driver.tx_buf[PREAMBLE_SIZE - 1];
+        assert!(data_size == data.len() as u8);
     }
 
     #[test]
@@ -188,7 +191,7 @@ mod tests {
 
         let data = b"Hello there!";
 
-        driver.send(data);
+        let n_bytes_sent = driver.send(data);
 
         let mut transmitted_data = Vec::<u8, MAX_MESSAGE_LENGTH>::new();
         let mut current_byte = 0u8;
@@ -208,6 +211,7 @@ mod tests {
         }
 
         assert!(&transmitted_data[PREAMBLE_SIZE..] == data);
+        assert!(&transmitted_data[PREAMBLE_SIZE - 1] == &(n_bytes_sent as u8));
     }
 }
 
