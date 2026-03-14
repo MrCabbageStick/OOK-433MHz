@@ -12,6 +12,7 @@ pub const SYNC_SEQUENCE_BIT_LENGTH: u8 = SYNC_SEQUENCE.len() as u8 * 8;
 /// Sync bytes + Message start byte
 pub const PREAMBLE: [u8; 3] = [SYNC_SEQUENCE[0], SYNC_SEQUENCE[1], MESSAGE_START_BYTE];
 
+/// Sync bytes + Message start byte
 pub const PREAMBLE_SIZE: usize = PREAMBLE.len();
 
 /// Preamble + Message size byte

@@ -113,7 +113,7 @@ where
     fn transmit(&mut self) {
         //! First sends then incerements
 
-        let state = (self.tx_buf[self.tx_buf_index] >> self.tx_bit_index) & 1 == 1;
+        let state = (self.tx_buf[self.tx_buf_index] >> (7 - self.tx_bit_index)) & 1 == 1;
         self.set_tx_state(state);
 
         self.tx_current_tick += 1;
@@ -250,7 +250,7 @@ where
 
                 // SYNC_SEQUENCE_BIT_LENGTH - 1, because first bit
                 // goes into bits and isn't counted
-                if self.rx_sync_n_correct_bits >= SYNC_SEQUENCE_BIT_LENGTH - 2 {
+                if self.rx_sync_n_correct_bits >= SYNC_SEQUENCE_BIT_LENGTH - 1 {
                     self.rx_synced = true;
 
                     self.rx_buf.extend(SYNC_SEQUENCE.iter().copied());
@@ -282,7 +282,7 @@ where
         // }
 
         // Append bit to byte
-        self.rx_byte |= state_from_ticks << self.rx_bit_index;
+        self.rx_byte |= state_from_ticks << (7 - self.rx_bit_index);
         self.rx_bit_index += 1;
 
         // Full byte
@@ -393,13 +393,13 @@ mod tests {
 
             n_ticks += 1;
 
+            current_byte |= (driver.tx.is_high().unwrap() as u8) << (7 - nth_bit);
+
             if n_ticks < driver.ticks_per_bit {
                 continue;
             }
 
             n_ticks = 0;
-
-            current_byte |= (driver.tx.is_high().unwrap() as u8) << nth_bit;
 
             nth_bit += 1;
 
@@ -410,7 +410,11 @@ mod tests {
             }
         }
 
-        assert!(&transmitted_data[MESSAGE_OFFSET..] == data);
+        assert!(
+            &transmitted_data[MESSAGE_OFFSET..] == data,
+            "{:?}",
+            transmitted_data
+        );
         assert!(&transmitted_data[MESSAGE_OFFSET - 1] == &(n_bytes_sent as u8));
     }
 
