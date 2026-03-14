@@ -1,5 +1,6 @@
 use crate::consts::{
-    MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, MESSAGE_START_BYTE, PREAMBLE, PREAMBLE_SIZE,
+    MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, MESSAGE_OFFSET, MESSAGE_START_BYTE, PREAMBLE,
+    PREAMBLE_SIZE, SYNC_SEQUENCE, SYNC_SEQUENCE_BIT_LENGTH,
 };
 use embedded_hal::digital::v2::{InputPin, OutputPin, PinState};
 use heapless::Vec;
@@ -37,6 +38,10 @@ where
     rx_n_ones_in_tick: u8,
     rx_detected_one: bool,
 
+    rx_sync_n_correct_bits: u8,
+    rx_sync_bits: u8,
+    rx_synced: bool,
+
     // Misc
     mode: OokMode,
     ticks_per_bit: u8,
@@ -69,6 +74,10 @@ where
             rx_current_tick: 0,
             rx_n_ones_in_tick: 0,
             rx_detected_one: false,
+
+            rx_sync_bits: 0,
+            rx_sync_n_correct_bits: 0,
+            rx_synced: false,
 
             mode: OokMode::Idle,
             ticks_per_bit: 8,
@@ -163,11 +172,17 @@ where
     /// Cleanup before reading into the `rx_buffer`
     fn start_receiving(&mut self) {
         self.mode = OokMode::Receive;
+
         self.rx_message_received = false;
         self.rx_message_length = 0;
         self.rx_current_tick = 0;
         self.rx_n_ones_in_tick = 0;
         self.rx_detected_one = false;
+
+        self.rx_sync_bits = 0;
+        self.rx_sync_n_correct_bits = 0;
+        self.rx_synced = false;
+
         self.rx_buf.clear();
     }
 
@@ -192,6 +207,8 @@ where
 
     /// Receive bit from `rx` and put it into `rx_buf`
     fn receive(&mut self) {
+        // === Tick operations === //
+
         let rx_state = self.read_rx_state();
         self.rx_n_ones_in_tick += rx_state as u8;
 
@@ -218,21 +235,51 @@ where
         let state_from_ticks = (self.rx_n_ones_in_tick >= (self.ticks_per_bit / 2)) as u8;
         self.rx_n_ones_in_tick = 0;
 
-        if !self.rx_message_started {
-            // Push bit onto byte
-            // This way its possible to detect start byte
-            self.rx_byte >>= 1;
-            self.rx_byte |= state_from_ticks << 7;
+        // === Syncing === //
 
-            // Check if message start byte reached
-            if self.rx_byte == MESSAGE_START_BYTE {
-                self.rx_message_started = true;
-                self.rx_buf.push(self.rx_byte).unwrap();
-                self.rx_byte = 0;
+        // Syncing
+        if !self.rx_synced {
+            // Push bit
+            self.rx_sync_bits <<= 1;
+            self.rx_sync_bits |= state_from_ticks;
+
+            // Check if bits are 0b10 or 0b101,
+            // as this matches a sequence of repeating 1s and 0s
+            if self.rx_sync_bits & 0b11 == 0b10 || self.rx_sync_bits & 0b111 == 0b101 {
+                self.rx_sync_n_correct_bits += 1;
+
+                // SYNC_SEQUENCE_BIT_LENGTH - 1, because first bit
+                // goes into bits and isn't counted
+                if self.rx_sync_n_correct_bits >= SYNC_SEQUENCE_BIT_LENGTH - 2 {
+                    self.rx_synced = true;
+
+                    self.rx_buf.extend(SYNC_SEQUENCE.iter().copied());
+                }
+            } else {
+                // It wasn't sync sequence after all
+                self.rx_sync_n_correct_bits = 0;
             }
 
             return;
         }
+
+        // === Message start detection === //
+
+        // if !self.rx_message_started {
+        //     // Push bit onto byte
+        //     // This way its possible to detect start byte
+        //     self.rx_byte >>= 1;
+        //     self.rx_byte |= state_from_ticks << 7;
+
+        //     // Check if message start byte reached
+        //     if self.rx_byte == MESSAGE_START_BYTE {
+        //         self.rx_message_started = true;
+        //         self.rx_buf.push(self.rx_byte).unwrap();
+        //         self.rx_byte = 0;
+        //     }
+
+        //     return;
+        // }
 
         // Append bit to byte
         self.rx_byte |= state_from_ticks << self.rx_bit_index;
@@ -241,6 +288,18 @@ where
         // Full byte
         if self.rx_bit_index >= 8 {
             self.rx_bit_index = 0;
+
+            if !self.rx_message_started {
+                // Check for start byte
+                if self.rx_byte == MESSAGE_START_BYTE {
+                    self.rx_message_started = true;
+                    self.rx_buf.push(self.rx_byte).unwrap();
+                    self.rx_byte = 0;
+                }
+
+                // I think I should discard message here
+                return;
+            }
 
             // Message length not set up yet
             if self.rx_message_length == 0 {
@@ -251,7 +310,7 @@ where
             self.rx_byte = 0;
 
             // Message end reached or message wouldn't fit and gets truncated
-            if self.rx_buf.len() >= self.rx_message_length as usize + PREAMBLE_SIZE
+            if self.rx_buf.len() >= self.rx_message_length as usize + MESSAGE_OFFSET
                 || self.rx_buf.len() >= MAX_MESSAGE_LENGTH
             {
                 self.rx_message_received = true;
@@ -294,9 +353,9 @@ mod tests {
 
         assert!(n_sent_bytes == data.len());
         assert!(driver.mode == OokMode::Transmit);
-        assert!(&driver.tx_buf[PREAMBLE_SIZE..PREAMBLE_SIZE + data.len()] == data);
+        assert!(&driver.tx_buf[MESSAGE_OFFSET..MESSAGE_OFFSET + data.len()] == data);
 
-        let data_size = driver.tx_buf[PREAMBLE_SIZE - 1];
+        let data_size = driver.tx_buf[MESSAGE_OFFSET - 1];
         assert!(data_size == data.len() as u8);
     }
 
@@ -311,7 +370,7 @@ mod tests {
 
         assert!(n_sent_bytes == MAX_MESSAGE_LENGTH, "{}", n_sent_bytes);
         assert!(
-            &driver.tx_buf[PREAMBLE_SIZE..PREAMBLE_SIZE + n_sent_bytes]
+            &driver.tx_buf[MESSAGE_OFFSET..MESSAGE_OFFSET + n_sent_bytes]
                 == &data[..MAX_MESSAGE_LENGTH]
         );
     }
@@ -351,8 +410,8 @@ mod tests {
             }
         }
 
-        assert!(&transmitted_data[PREAMBLE_SIZE..] == data);
-        assert!(&transmitted_data[PREAMBLE_SIZE - 1] == &(n_bytes_sent as u8));
+        assert!(&transmitted_data[MESSAGE_OFFSET..] == data);
+        assert!(&transmitted_data[MESSAGE_OFFSET - 1] == &(n_bytes_sent as u8));
     }
 
     #[test]
@@ -360,7 +419,7 @@ mod tests {
         let mut transmitter = OokDriver::new(MockPin::new(), MockPin::new());
         let mut receiver = OokDriver::new(MockPin::new(), MockPin::new());
 
-        let data = b"Hello there!";
+        let data = b"^Hello there!";
 
         let n_bytes = transmitter.send(data);
 
@@ -380,11 +439,11 @@ mod tests {
         };
 
         // Check for preambule
-        assert!(msg[0] == MESSAGE_START_BYTE);
+        assert!(msg[PREAMBLE_SIZE - 1] == MESSAGE_START_BYTE, "{:?}", msg);
         // Check if length matches
-        assert!(msg[PREAMBLE_SIZE - 1] as usize == n_bytes);
+        assert!(msg[PREAMBLE_SIZE] as usize == n_bytes, "{:?}", msg);
         // Check if data was transmitted successfully
-        assert!(&msg[PREAMBLE_SIZE..] == data);
+        assert!(&msg[MESSAGE_OFFSET..] == data);
     }
 }
 
