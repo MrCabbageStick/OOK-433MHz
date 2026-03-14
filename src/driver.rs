@@ -35,6 +35,7 @@ where
     rx_message_started: bool,
     rx_current_tick: u8,
     rx_n_ones_in_tick: u8,
+    rx_detected_one: bool,
 
     // Misc
     mode: OokMode,
@@ -67,6 +68,7 @@ where
             rx_message_started: false,
             rx_current_tick: 0,
             rx_n_ones_in_tick: 0,
+            rx_detected_one: false,
 
             mode: OokMode::Idle,
             ticks_per_bit: 8,
@@ -165,6 +167,7 @@ where
         self.rx_message_length = 0;
         self.rx_current_tick = 0;
         self.rx_n_ones_in_tick = 0;
+        self.rx_detected_one = false;
         self.rx_buf.clear();
     }
 
@@ -189,7 +192,19 @@ where
 
     /// Receive bit from `rx` and put it into `rx_buf`
     fn receive(&mut self) {
-        self.rx_n_ones_in_tick += self.read_rx_state() as u8;
+        let rx_state = self.read_rx_state();
+        self.rx_n_ones_in_tick += rx_state as u8;
+
+        // Wait for at least one 1 to be detected
+        // This might help with synchronization
+        if !self.rx_detected_one {
+            if !rx_state {
+                return;
+            } else {
+                self.rx_detected_one = true;
+            }
+        }
+
         self.rx_current_tick += 1;
 
         // Skip if not enough ticks to read a bit
