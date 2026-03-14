@@ -23,6 +23,7 @@ where
     tx_buf_index: usize,
     /// Index of bit in byte of `tx_buf`
     tx_bit_index: u8,
+    tx_current_tick: u8,
 
     // Receiver fields
     pub rx: RX,
@@ -32,9 +33,12 @@ where
     rx_message_length: u8,
     rx_message_received: bool,
     rx_message_started: bool,
+    rx_current_tick: u8,
+    rx_n_ones_in_tick: u8,
 
     // Misc
     mode: OokMode,
+    ticks_per_bit: u8,
 }
 
 impl<TX, RX> OokDriver<TX, RX>
@@ -52,6 +56,7 @@ where
             tx_buf,
             tx_bit_index: 0,
             tx_buf_index: 0,
+            tx_current_tick: 0,
 
             rx,
             rx_buf: Vec::new(),
@@ -60,8 +65,11 @@ where
             rx_message_length: 0,
             rx_message_received: false,
             rx_message_started: false,
+            rx_current_tick: 0,
+            rx_n_ones_in_tick: 0,
 
             mode: OokMode::Idle,
+            ticks_per_bit: 8,
         }
     }
 
@@ -85,6 +93,7 @@ where
         self.tx_bit_index = 0;
         self.tx_buf_index = 0;
         self.mode = OokMode::Idle;
+        self.tx_current_tick = 0;
         self.set_tx_state(false);
     }
 
@@ -95,6 +104,14 @@ where
 
         let state = (self.tx_buf[self.tx_buf_index] >> self.tx_bit_index) & 1 == 1;
         self.set_tx_state(state);
+
+        self.tx_current_tick += 1;
+        // Skip if not enough ticks to read a bit
+        if self.tx_current_tick < self.ticks_per_bit {
+            return;
+        }
+
+        self.tx_current_tick = 0;
 
         self.tx_bit_index += 1;
         // If byte ends
@@ -146,10 +163,12 @@ where
         self.mode = OokMode::Receive;
         self.rx_message_received = false;
         self.rx_message_length = 0;
+        self.rx_current_tick = 0;
+        self.rx_n_ones_in_tick = 0;
         self.rx_buf.clear();
     }
 
-    /// Check if receiver is available, if so, primes it for receiving data
+    /// Check if receiver is available, if so, prime it for receiving data
     pub fn receiver_available(&mut self) -> bool {
         if self.mode == OokMode::Idle {
             self.start_receiving();
@@ -170,11 +189,25 @@ where
 
     /// Receive bit from `rx` and put it into `rx_buf`
     fn receive(&mut self) {
+        self.rx_n_ones_in_tick += self.read_rx_state() as u8;
+        self.rx_current_tick += 1;
+
+        // Skip if not enough ticks to read a bit
+        if self.rx_current_tick < self.ticks_per_bit {
+            return;
+        }
+
+        self.rx_current_tick = 0;
+
+        // At least half of ticks should be 1 for bit to be 1
+        let state_from_ticks = (self.rx_n_ones_in_tick >= (self.ticks_per_bit / 2)) as u8;
+        self.rx_n_ones_in_tick = 0;
+
         if !self.rx_message_started {
             // Push bit onto byte
             // This way its possible to detect start byte
             self.rx_byte >>= 1;
-            self.rx_byte |= (self.read_rx_state() as u8) << 7;
+            self.rx_byte |= state_from_ticks << 7;
 
             // Check if message start byte reached
             if self.rx_byte == MESSAGE_START_BYTE {
@@ -187,7 +220,7 @@ where
         }
 
         // Append bit to byte
-        self.rx_byte |= (self.read_rx_state() as u8) << (self.rx_bit_index);
+        self.rx_byte |= state_from_ticks << self.rx_bit_index;
         self.rx_bit_index += 1;
 
         // Full byte
@@ -279,13 +312,23 @@ mod tests {
         let mut transmitted_data = Vec::<u8, MAX_MESSAGE_LENGTH>::new();
         let mut current_byte = 0u8;
         let mut nth_bit = 0u8;
+        let mut n_ticks = 0u8;
 
         while driver.mode == OokMode::Transmit {
             driver.tick();
 
+            n_ticks += 1;
+
+            if n_ticks < driver.ticks_per_bit {
+                continue;
+            }
+
+            n_ticks = 0;
+
             current_byte |= (driver.tx.is_high().unwrap() as u8) << nth_bit;
 
             nth_bit += 1;
+
             if nth_bit >= 8 {
                 nth_bit = 0;
                 transmitted_data.push(current_byte).unwrap();
