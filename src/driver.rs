@@ -207,12 +207,72 @@ where
         Err(ReceiverError::MessageNotReady)
     }
 
+    /// Handle tick to bit conversion
+    fn get_bit(&mut self, state: bool) -> Result<u8, ()> {
+        self.rx_n_ones_in_tick += state as u8;
+
+        self.rx_current_tick += 1;
+
+        // Skip if not enough ticks to read a bit
+        if self.rx_current_tick < self.ticks_per_bit {
+            return Err(());
+        }
+
+        self.rx_current_tick = 0;
+
+        // At least half of ticks should be 1 for bit to be 1
+        let state_from_ticks = (self.rx_n_ones_in_tick >= (self.ticks_per_bit / 2)) as u8;
+        self.rx_n_ones_in_tick = 0;
+
+        Ok(state_from_ticks)
+    }
+
+    fn get_synced(&mut self, bit: u8) -> bool {
+        if self.rx_synced {
+            return true;
+        }
+
+        // Push bit
+        self.rx_sync_bits <<= 1;
+        self.rx_sync_bits |= bit;
+
+        // Check if bits are 0b10 or 0b101,
+        // as this matches a sequence of repeating 1s and 0s
+        if self.rx_sync_bits & 0b11 == 0b10 || self.rx_sync_bits & 0b111 == 0b101 {
+            self.rx_sync_n_correct_bits += 1;
+
+            // SYNC_SEQUENCE_BIT_LENGTH - 1, because first bit isn't counted
+            if self.rx_sync_n_correct_bits >= SYNC_SEQUENCE_BIT_LENGTH - 1 {
+                // Don't return true from here, because this is the last bit
+                // of sync sequnce
+                self.rx_synced = true;
+                self.rx_buf.extend(SYNC_SEQUENCE.iter().copied());
+            }
+        } else {
+            // It wasn't sync sequence after all
+            self.rx_sync_n_correct_bits = 0;
+        }
+
+        return false;
+    }
+
+    fn get_byte(&mut self, bit: u8) -> Result<u8, ()> {
+        // Append bit to byte
+        self.rx_byte |= bit << (7 - self.rx_bit_index);
+        self.rx_bit_index += 1;
+
+        // Full byte
+        if self.rx_bit_index >= 8 {
+            self.rx_bit_index = 0;
+            return Ok(self.rx_byte);
+        }
+
+        Err(())
+    }
+
     /// Receive bit from `rx` and put it into `rx_buf`
     fn receive(&mut self) {
-        // === Tick operations === //
-
         let rx_state = self.read_rx_state();
-        self.rx_n_ones_in_tick += rx_state as u8;
 
         // Wait for at least one 1 to be detected
         // This might help with synchronization
@@ -224,100 +284,45 @@ where
             }
         }
 
-        self.rx_current_tick += 1;
-
-        // Skip if not enough ticks to read a bit
-        if self.rx_current_tick < self.ticks_per_bit {
+        let Ok(bit) = self.get_bit(rx_state) else {
             return;
-        }
-
-        self.rx_current_tick = 0;
-
-        // At least half of ticks should be 1 for bit to be 1
-        let state_from_ticks = (self.rx_n_ones_in_tick >= (self.ticks_per_bit / 2)) as u8;
-        self.rx_n_ones_in_tick = 0;
-
-        // === Syncing === //
+        };
 
         // Syncing
-        if !self.rx_synced {
-            // Push bit
-            self.rx_sync_bits <<= 1;
-            self.rx_sync_bits |= state_from_ticks;
-
-            // Check if bits are 0b10 or 0b101,
-            // as this matches a sequence of repeating 1s and 0s
-            if self.rx_sync_bits & 0b11 == 0b10 || self.rx_sync_bits & 0b111 == 0b101 {
-                self.rx_sync_n_correct_bits += 1;
-
-                // SYNC_SEQUENCE_BIT_LENGTH - 1, because first bit
-                // goes into bits and isn't counted
-                if self.rx_sync_n_correct_bits >= SYNC_SEQUENCE_BIT_LENGTH - 1 {
-                    self.rx_synced = true;
-
-                    self.rx_buf.extend(SYNC_SEQUENCE.iter().copied());
-                }
-            } else {
-                // It wasn't sync sequence after all
-                self.rx_sync_n_correct_bits = 0;
-            }
-
+        if !self.get_synced(bit) {
             return;
         }
 
-        // === Message start detection === //
+        let Ok(_byte) = self.get_byte(bit) else {
+            return;
+        };
 
-        // if !self.rx_message_started {
-        //     // Push bit onto byte
-        //     // This way its possible to detect start byte
-        //     self.rx_byte >>= 1;
-        //     self.rx_byte |= state_from_ticks << 7;
-
-        //     // Check if message start byte reached
-        //     if self.rx_byte == MESSAGE_START_BYTE {
-        //         self.rx_message_started = true;
-        //         self.rx_buf.push(self.rx_byte).unwrap();
-        //         self.rx_byte = 0;
-        //     }
-
-        //     return;
-        // }
-
-        // Append bit to byte
-        self.rx_byte |= state_from_ticks << (7 - self.rx_bit_index);
-        self.rx_bit_index += 1;
-
-        // Full byte
-        if self.rx_bit_index >= 8 {
-            self.rx_bit_index = 0;
-
-            if !self.rx_message_started {
-                // Check for start byte
-                if self.rx_byte == MESSAGE_START_BYTE {
-                    self.rx_message_started = true;
-                    self.rx_buf.push(self.rx_byte).unwrap();
-                    self.rx_byte = 0;
-                }
-
-                // I think I should discard message here
-                return;
+        if !self.rx_message_started {
+            // Check for start byte
+            if self.rx_byte == MESSAGE_START_BYTE {
+                self.rx_message_started = true;
+                self.rx_buf.push(self.rx_byte).unwrap();
+                self.rx_byte = 0;
             }
 
-            // Message length not set up yet
-            if self.rx_message_length == 0 {
-                self.rx_message_length = self.rx_byte;
-            }
+            // I think I should discard message here
+            return;
+        }
 
-            self.rx_buf.push(self.rx_byte).unwrap();
-            self.rx_byte = 0;
+        // Message length not set up yet
+        if self.rx_message_length == 0 {
+            self.rx_message_length = self.rx_byte;
+        }
 
-            // Message end reached or message wouldn't fit and gets truncated
-            if self.rx_buf.len() >= self.rx_message_length as usize + MESSAGE_OFFSET
-                || self.rx_buf.len() >= MAX_BUFFER_SIZE
-            {
-                self.rx_message_received = true;
-                self.mode = OokMode::Idle
-            }
+        self.rx_buf.push(self.rx_byte).unwrap();
+        self.rx_byte = 0;
+
+        // Message end reached or message wouldn't fit and gets truncated
+        if self.rx_buf.len() >= self.rx_message_length as usize + MESSAGE_OFFSET
+            || self.rx_buf.len() >= MAX_BUFFER_SIZE
+        {
+            self.rx_message_received = true;
+            self.mode = OokMode::Idle
         }
     }
 
@@ -456,7 +461,36 @@ mod tests {
         assert!(&msg[MESSAGE_OFFSET..] == data);
     }
 
-    const messages: [&[u8]; 3] = [
+    #[test]
+    fn syncing() {
+        let mut possible_preceding_bytes: [u8; 256] = [0; 256];
+        (0..=255)
+            .enumerate()
+            .for_each(|(i, byte)| possible_preceding_bytes[i] = byte);
+
+        for possible_byte in possible_preceding_bytes {
+            let signal = [possible_byte, SYNC_SEQUENCE[0], SYNC_SEQUENCE[1]];
+
+            let mut receiver = OokDriver::new(MockPin::new(), MockPin::new());
+
+            for byte in signal {
+                let mut bit_index = 0;
+
+                while bit_index < 8 {
+                    receiver.get_synced((byte >> (7 - bit_index)) & 0x1);
+                    bit_index += 1;
+                }
+            }
+
+            assert!(
+                receiver.rx_synced,
+                "Receiver not synced with byte {:x} preceeding the sync signal",
+                possible_byte
+            );
+        }
+    }
+
+    const MESSAGES: [&[u8]; 3] = [
         b"Hello there!",
         b"It's been a while",
         b"abcdefghijklmnopqrstuwxyz",
@@ -466,7 +500,7 @@ mod tests {
     fn transmit_multiple_messages() {
         let mut transmitter = OokDriver::new(MockPin::new(), MockPin::new());
 
-        for message in messages {
+        for message in MESSAGES {
             let expected_tick_count =
                 (message.len() + MESSAGE_OFFSET) * transmitter.ticks_per_bit as usize * 8;
             let mut n_ticks = 0usize;
