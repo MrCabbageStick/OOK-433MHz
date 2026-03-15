@@ -178,6 +178,8 @@ where
         self.rx_current_tick = 0;
         self.rx_n_ones_in_tick = 0;
         self.rx_detected_one = false;
+        self.rx_byte = 0;
+        self.rx_message_started = false;
 
         self.rx_sync_bits = 0;
         self.rx_sync_n_correct_bits = 0;
