@@ -170,7 +170,7 @@ where
     // ===== RECEIVING =====
 
     /// Cleanup before reading into the `rx_buffer`
-    fn start_receiving(&mut self) {
+    fn setup_receiver(&mut self) {
         self.mode = OokMode::Receive;
 
         self.rx_message_received = false;
@@ -186,10 +186,12 @@ where
         self.rx_buf.clear();
     }
 
-    /// Check if receiver is available, if so, prime it for receiving data
-    pub fn receiver_available(&mut self) -> bool {
+    /// Check if receiver is available, if so, prime it for receiving data\
+    /// This methods clears contents of `rx_buf` so any message stored in it
+    /// will be removed
+    pub fn start_receiving(&mut self) -> bool {
         if self.mode == OokMode::Idle {
-            self.start_receiving();
+            self.setup_receiver();
         }
 
         self.mode == OokMode::Receive
@@ -311,7 +313,7 @@ where
 
             // Message end reached or message wouldn't fit and gets truncated
             if self.rx_buf.len() >= self.rx_message_length as usize + MESSAGE_OFFSET
-                || self.rx_buf.len() >= MAX_MESSAGE_LENGTH
+                || self.rx_buf.len() >= MAX_BUFFER_SIZE
             {
                 self.rx_message_received = true;
                 self.mode = OokMode::Idle
@@ -334,6 +336,10 @@ where
     pub fn is_idle(&self) -> bool {
         return self.mode == OokMode::Idle;
     }
+}
+
+pub enum ReceiverError {
+    MessageNotReady,
 }
 
 #[cfg(test)]
@@ -428,7 +434,7 @@ mod tests {
         let n_bytes = transmitter.send(data);
 
         // Prime receiver
-        receiver.receiver_available();
+        receiver.start_receiving();
 
         let msg = loop {
             // Return if message ready
@@ -449,8 +455,39 @@ mod tests {
         // Check if data was transmitted successfully
         assert!(&msg[MESSAGE_OFFSET..] == data);
     }
-}
 
-pub enum ReceiverError {
-    MessageNotReady,
+    const messages: [&[u8]; 3] = [
+        b"Hello there!",
+        b"It's been a while",
+        b"abcdefghijklmnopqrstuwxyz",
+    ];
+
+    #[test]
+    fn transmit_multiple_messages() {
+        let mut transmitter = OokDriver::new(MockPin::new(), MockPin::new());
+
+        for message in messages {
+            let expected_tick_count =
+                (message.len() + MESSAGE_OFFSET) * transmitter.ticks_per_bit as usize * 8;
+            let mut n_ticks = 0usize;
+
+            transmitter.send(message);
+
+            while transmitter.mode == OokMode::Transmit {
+                transmitter.tick();
+
+                assert!(
+                    n_ticks < expected_tick_count,
+                    "Transmitter ticked too many times to send a message\n"
+                );
+
+                n_ticks += 1;
+            }
+
+            assert!(
+                n_ticks == expected_tick_count,
+                "Transmitter ticked incorrect number of times to send a message"
+            );
+        }
+    }
 }
