@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod consts;
+pub mod data_coding;
 pub mod driver;
 pub mod mock_pin;
 
