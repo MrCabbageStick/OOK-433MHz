@@ -1,6 +1,9 @@
-use crate::consts::{
-    MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, MESSAGE_OFFSET, MESSAGE_START_BYTE, PREAMBLE,
-    PREAMBLE_SIZE, SYNC_SEQUENCE, SYNC_SEQUENCE_BIT_LENGTH,
+use crate::{
+    consts::{
+        MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, MESSAGE_OFFSET, MESSAGE_START_BYTE, PREAMBLE,
+        PREAMBLE_SIZE, SYNC_SEQUENCE, SYNC_SEQUENCE_BIT_LENGTH,
+    },
+    data_coding::radio_head_4b6b,
 };
 use embedded_hal::digital::v2::{InputPin, OutputPin, PinState};
 use heapless::Vec;
@@ -182,6 +185,15 @@ where
 
         // Push data to buf
         self.tx_buf.extend(safe_bytes.iter().copied());
+        // Make space for encoding
+        self.tx_buf.extend(safe_bytes.iter().copied());
+
+        self.tx_buf
+            .push(0)
+            .expect("Unable to make space for encoded size");
+
+        radio_head_4b6b::encode_in_place(&mut self.tx_buf, safe_bytes.len() + 1)
+            .expect("tx_buf cannot be encoded");
 
         self.mode = OokMode::Transmit;
 
@@ -376,8 +388,6 @@ mod tests {
 
     use super::*;
 
-    const TOO_LARGE_MESSAGE_SIZE: usize = MAX_MESSAGE_LENGTH + 1;
-
     #[test]
     fn tx_buf_correct_size_message() {
         let mut driver = OokDriver::new(MockPin::new(), MockPin::new());
@@ -387,11 +397,16 @@ mod tests {
 
         assert!(n_sent_bytes == data.len());
         assert!(driver.mode == OokMode::Transmit);
+
+        radio_head_4b6b::decode_in_place(&mut driver.tx_buf).expect("Unable to decode tx_buf");
+
         assert!(&driver.tx_buf[1..data.len() + 1] == data);
 
         let data_size = driver.tx_buf[0];
         assert!(data_size == data.len() as u8);
     }
+
+    const TOO_LARGE_MESSAGE_SIZE: usize = MAX_MESSAGE_LENGTH + 1;
 
     #[test]
     fn tx_buf_message_too_large() {
@@ -401,6 +416,8 @@ mod tests {
         data.resize(TOO_LARGE_MESSAGE_SIZE, b'^').unwrap();
 
         let n_sent_bytes = driver.send(data.as_slice());
+
+        radio_head_4b6b::decode_in_place(&mut driver.tx_buf).expect("Unable to decode tx_buf");
 
         assert!(n_sent_bytes == MAX_MESSAGE_LENGTH, "{}", n_sent_bytes);
         assert!(&driver.tx_buf[1..n_sent_bytes + 1] == &data[..MAX_MESSAGE_LENGTH]);
@@ -419,6 +436,10 @@ mod tests {
         let mut nth_bit = 0u8;
         let mut n_ticks = 0u8;
 
+        let mut n_bytes = 0usize;
+
+        let mut decoder = radio_head_4b6b::RunningDecoder::new();
+
         while driver.mode == OokMode::Transmit {
             driver.tick();
 
@@ -436,8 +457,22 @@ mod tests {
 
             if nth_bit >= 8 {
                 nth_bit = 0;
-                transmitted_data.push(current_byte).unwrap();
+
+                // After sync bytes and message start byte
+                if n_bytes >= PREAMBLE_SIZE {
+                    match decoder.next_nibble(current_byte) {
+                        Ok(byte) => transmitted_data.push(byte).unwrap(),
+                        Err(err) => match err {
+                            radio_head_4b6b::RunningDecoderError::ByteNotReady => {}
+                            radio_head_4b6b::RunningDecoderError::UnknownSymbol(s) => {
+                                panic!("Unable to decode incoming data, unknown symbol: 0x{:x}", s);
+                            }
+                        },
+                    }
+                }
+
                 current_byte = 0;
+                n_bytes += 1;
             }
         }
 
@@ -447,6 +482,42 @@ mod tests {
             transmitted_data
         );
         assert!(&transmitted_data[MESSAGE_OFFSET - 1] == &(n_bytes_sent as u8));
+    }
+
+    const MESSAGES: [&[u8]; 3] = [
+        b"Hello there!",
+        b"It's been a while",
+        b"abcdefghijklmnopqrstuwxyz",
+    ];
+
+    #[test]
+    fn transmit_multiple_messages() {
+        let mut transmitter = OokDriver::new(MockPin::new(), MockPin::new());
+
+        for message in MESSAGES {
+            let expected_tick_count = ((message.len() + MESSAGE_OFFSET) * 2 + PREAMBLE_SIZE)
+                * transmitter.ticks_per_bit as usize
+                * 8;
+            let mut n_ticks = 0usize;
+
+            transmitter.send(message);
+
+            while transmitter.mode == OokMode::Transmit {
+                transmitter.tick();
+
+                assert!(
+                    n_ticks < expected_tick_count,
+                    "Transmitter ticked too many times to send a message\n"
+                );
+
+                n_ticks += 1;
+            }
+
+            assert!(
+                n_ticks == expected_tick_count,
+                "Transmitter ticked incorrect number of times to send a message"
+            );
+        }
     }
 
     #[test]
@@ -504,41 +575,6 @@ mod tests {
                 receiver.rx_synced,
                 "Receiver not synced with byte {:x} preceeding the sync signal",
                 possible_byte
-            );
-        }
-    }
-
-    const MESSAGES: [&[u8]; 3] = [
-        b"Hello there!",
-        b"It's been a while",
-        b"abcdefghijklmnopqrstuwxyz",
-    ];
-
-    #[test]
-    fn transmit_multiple_messages() {
-        let mut transmitter = OokDriver::new(MockPin::new(), MockPin::new());
-
-        for message in MESSAGES {
-            let expected_tick_count =
-                (message.len() + MESSAGE_OFFSET) * transmitter.ticks_per_bit as usize * 8;
-            let mut n_ticks = 0usize;
-
-            transmitter.send(message);
-
-            while transmitter.mode == OokMode::Transmit {
-                transmitter.tick();
-
-                assert!(
-                    n_ticks < expected_tick_count,
-                    "Transmitter ticked too many times to send a message\n"
-                );
-
-                n_ticks += 1;
-            }
-
-            assert!(
-                n_ticks == expected_tick_count,
-                "Transmitter ticked incorrect number of times to send a message"
             );
         }
     }

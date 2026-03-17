@@ -15,7 +15,7 @@ pub const PREAMBLE: [u8; 3] = [SYNC_SEQUENCE[0], SYNC_SEQUENCE[1], MESSAGE_START
 /// Sync bytes + Message start byte
 pub const PREAMBLE_SIZE: usize = PREAMBLE.len();
 
-/// Preamble + Message size byte
-pub const MESSAGE_OFFSET: usize = PREAMBLE_SIZE + 1;
+/// Message size byte
+pub const MESSAGE_OFFSET: usize = 1;
 
-pub const MAX_MESSAGE_LENGTH: usize = MAX_BUFFER_SIZE - MESSAGE_OFFSET;
+pub const MAX_MESSAGE_LENGTH: usize = MAX_BUFFER_SIZE / 2 - 1;
