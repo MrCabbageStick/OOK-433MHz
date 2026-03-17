@@ -19,12 +19,14 @@ where
 {
     // Transmitter fields
     pub tx: TX,
+    /// Buffer for message to be sent
     tx_buf: Vec<u8, MAX_BUFFER_SIZE>,
-    /// Index of byte in `tx_buf`
+    /// Index of byte in `tx_buf` or PREAMBLE
     tx_buf_index: usize,
     /// Index of bit in byte of `tx_buf`
     tx_bit_index: u8,
     tx_current_tick: u8,
+    tx_preamble_sent: bool,
 
     // Receiver fields
     pub rx: RX,
@@ -54,15 +56,16 @@ where
 {
     pub fn new(tx: TX, rx: RX) -> Self {
         // Insert preamble into tx_buf, it should stay there forever
-        let tx_buf = Vec::from_slice(&PREAMBLE)
-            .expect("Unable to fit preamble into tx_buf, MAX_BUFFER_SIZE might be smaller than PREAMBLE_SIZE");
+        // let tx_buf = Vec::from_slice(&PREAMBLE)
+        //     .expect("Unable to fit preamble into tx_buf, MAX_BUFFER_SIZE might be smaller than PREAMBLE_SIZE");
 
         Self {
             tx,
-            tx_buf,
+            tx_buf: Vec::new(),
             tx_bit_index: 0,
             tx_buf_index: 0,
             tx_current_tick: 0,
+            tx_preamble_sent: false,
 
             rx,
             rx_buf: Vec::new(),
@@ -105,19 +108,27 @@ where
         self.tx_buf_index = 0;
         self.mode = OokMode::Idle;
         self.tx_current_tick = 0;
+        self.tx_preamble_sent = false;
         self.set_tx_state(false);
     }
 
     /// Transmits next bit\
     /// If end of buffer is reached finishes transmission
     fn transmit(&mut self) {
-        //! First sends then incerements
+        let byte_source = if !self.tx_preamble_sent {
+            // Retrieve bytes from preamble
+            &PREAMBLE
+        } else {
+            // Retrive bytes from buffer
+            self.tx_buf.as_slice()
+        };
 
-        let state = (self.tx_buf[self.tx_buf_index] >> (7 - self.tx_bit_index)) & 1 == 1;
+        let state = (byte_source[self.tx_buf_index] >> (7 - self.tx_bit_index)) & 1 == 1;
+
         self.set_tx_state(state);
 
         self.tx_current_tick += 1;
-        // Skip if not enough ticks to read a bit
+        // Skip if not enough ticks to send a bit
         if self.tx_current_tick < self.ticks_per_bit {
             return;
         }
@@ -131,6 +142,14 @@ where
 
             // Increment buf index
             self.tx_buf_index += 1;
+
+            // If preamble sent
+            if !self.tx_preamble_sent && self.tx_buf_index == PREAMBLE_SIZE {
+                self.tx_preamble_sent = true;
+                self.tx_buf_index = 0;
+                return;
+            }
+
             // If end of buffer reached end transmission
             if self.tx_buf_index >= self.tx_buf.len() {
                 self.end_transmission();
@@ -142,8 +161,8 @@ where
     /// If bytes length is larger than MAX_MESSAGE_LENGTH it will be truncated\
     /// Returns number of bytes put into the buffer
     pub fn send(&mut self, bytes: &[u8]) -> usize {
-        // Leave preamble inside buffer
-        self.tx_buf.truncate(PREAMBLE_SIZE);
+        // Clear buffer (maybe move to end_transittion)
+        self.tx_buf.clear();
 
         if bytes.len() == 0 {
             return 0;
@@ -156,10 +175,12 @@ where
             bytes
         };
 
+        // Push message length to buf
         self.tx_buf
             .push(safe_bytes.len() as u8)
             .expect("Unable to push message length into tx_buf");
 
+        // Push data to buf
         self.tx_buf.extend(safe_bytes.iter().copied());
 
         self.mode = OokMode::Transmit;
@@ -366,9 +387,9 @@ mod tests {
 
         assert!(n_sent_bytes == data.len());
         assert!(driver.mode == OokMode::Transmit);
-        assert!(&driver.tx_buf[MESSAGE_OFFSET..MESSAGE_OFFSET + data.len()] == data);
+        assert!(&driver.tx_buf[1..data.len() + 1] == data);
 
-        let data_size = driver.tx_buf[MESSAGE_OFFSET - 1];
+        let data_size = driver.tx_buf[0];
         assert!(data_size == data.len() as u8);
     }
 
@@ -382,10 +403,7 @@ mod tests {
         let n_sent_bytes = driver.send(data.as_slice());
 
         assert!(n_sent_bytes == MAX_MESSAGE_LENGTH, "{}", n_sent_bytes);
-        assert!(
-            &driver.tx_buf[MESSAGE_OFFSET..MESSAGE_OFFSET + n_sent_bytes]
-                == &data[..MAX_MESSAGE_LENGTH]
-        );
+        assert!(&driver.tx_buf[1..n_sent_bytes + 1] == &data[..MAX_MESSAGE_LENGTH]);
     }
 
     #[test]
