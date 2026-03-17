@@ -222,6 +222,7 @@ where
         self.rx_sync_n_correct_bits = 0;
         self.rx_synced = false;
         self.rx_decoder.reset();
+        self.rx_error = None;
 
         self.rx_buf.clear();
     }
