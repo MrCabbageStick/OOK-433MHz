@@ -1,7 +1,7 @@
 use crate::{
     consts::{
-        MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, MESSAGE_OFFSET, MESSAGE_START_BYTE, PREAMBLE,
-        PREAMBLE_SIZE, SYNC_SEQUENCE, SYNC_SEQUENCE_BIT_LENGTH,
+        MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, MESSAGE_START_BYTE, PREAMBLE, PREAMBLE_SIZE,
+        SYNC_SEQUENCE_BIT_LENGTH,
     },
     data_coding::radio_head_4b6b,
 };
@@ -46,6 +46,8 @@ where
     rx_sync_n_correct_bits: u8,
     rx_sync_bits: u8,
     rx_synced: bool,
+    rx_decoder: radio_head_4b6b::RunningDecoder,
+    rx_error: Option<FatalReceiverError>,
 
     // Misc
     mode: OokMode,
@@ -84,6 +86,8 @@ where
             rx_sync_bits: 0,
             rx_sync_n_correct_bits: 0,
             rx_synced: false,
+            rx_decoder: radio_head_4b6b::RunningDecoder::new(),
+            rx_error: None,
 
             mode: OokMode::Idle,
             ticks_per_bit: 8,
@@ -217,6 +221,7 @@ where
         self.rx_sync_bits = 0;
         self.rx_sync_n_correct_bits = 0;
         self.rx_synced = false;
+        self.rx_decoder.reset();
 
         self.rx_buf.clear();
     }
@@ -307,6 +312,10 @@ where
 
     /// Receive bit from `rx` and put it into `rx_buf`
     fn receive(&mut self) {
+        if self.rx_error.is_some() {
+            return;
+        }
+
         let rx_state = self.read_rx_state();
 
         // Wait for at least one 1 to be detected
@@ -344,6 +353,23 @@ where
             return;
         }
 
+        match self.rx_decoder.next_nibble(self.rx_byte) {
+            Ok(decoded_byte) => {
+                self.rx_byte = decoded_byte;
+            }
+            Err(err) => match err {
+                radio_head_4b6b::RunningDecoderError::ByteNotReady => {
+                    // Wait for next nibble to form a byte
+                    self.rx_byte = 0;
+                    return;
+                }
+                radio_head_4b6b::RunningDecoderError::UnknownSymbol(s) => {
+                    self.handle_fatal_receiver_error(FatalReceiverError::UnknownReceiverSymbol(s));
+                    return;
+                }
+            },
+        }
+
         // Message length not set up yet
         if self.rx_message_length == 0 {
             self.rx_message_length = self.rx_byte;
@@ -359,6 +385,15 @@ where
             self.rx_message_received = true;
             self.mode = OokMode::Idle;
         }
+    }
+
+    fn handle_fatal_receiver_error(&mut self, error: FatalReceiverError) {
+        self.rx_error = Some(error);
+        self.mode = OokMode::Idle;
+    }
+
+    pub fn get_read_error(&self) -> &Option<FatalReceiverError> {
+        &self.rx_error
     }
 
     // ===== MISC =====
@@ -382,9 +417,16 @@ pub enum ReceiverError {
     MessageNotReady,
 }
 
+pub enum FatalReceiverError {
+    UnknownReceiverSymbol(u8),
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::mock_pin::MockPin;
+    use crate::{
+        consts::{MESSAGE_OFFSET, SYNC_SEQUENCE},
+        mock_pin::MockPin,
+    };
 
     use super::*;
 
@@ -539,6 +581,18 @@ mod tests {
             }
 
             transmitter.tick();
+
+            if let Some(err) = receiver.get_read_error() {
+                match err {
+                    FatalReceiverError::UnknownReceiverSymbol(sym) => {
+                        panic!(
+                            "Error while reading data, unknown symbol: 0x{:x}\nrx: {:?}\ntx: {:?}",
+                            sym, receiver.rx_buf, transmitter.tx_buf
+                        )
+                    }
+                }
+            }
+
             // Sync state on receiver's rx pin and transmitter's tx pin
             receiver.rx.sync_with(&transmitter.tx);
             receiver.tick();

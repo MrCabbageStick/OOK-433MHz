@@ -90,6 +90,11 @@ pub mod radio_head_4b6b {
                 Err(RunningDecoderError::ByteNotReady)
             }
         }
+
+        pub fn reset(&mut self) {
+            self.byte = 0;
+            self.ms_nibble_next = false;
+        }
     }
 
     pub enum RunningDecoderError {
