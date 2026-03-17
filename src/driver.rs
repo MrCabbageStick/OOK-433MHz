@@ -269,7 +269,7 @@ where
                 // Don't return true from here, because this is the last bit
                 // of sync sequnce
                 self.rx_synced = true;
-                self.rx_buf.extend(SYNC_SEQUENCE.iter().copied());
+                // self.rx_buf.extend(SYNC_SEQUENCE.iter().copied());
             }
         } else {
             // It wasn't sync sequence after all
@@ -324,7 +324,7 @@ where
             // Check for start byte
             if self.rx_byte == MESSAGE_START_BYTE {
                 self.rx_message_started = true;
-                self.rx_buf.push(self.rx_byte).unwrap();
+                // self.rx_buf.push(self.rx_byte).unwrap();
                 self.rx_byte = 0;
             }
 
@@ -341,11 +341,11 @@ where
         self.rx_byte = 0;
 
         // Message end reached or message wouldn't fit and gets truncated
-        if self.rx_buf.len() >= self.rx_message_length as usize + MESSAGE_OFFSET
+        if self.rx_buf.len() >= self.rx_message_length as usize + 1
             || self.rx_buf.len() >= MAX_BUFFER_SIZE
         {
             self.rx_message_received = true;
-            self.mode = OokMode::Idle
+            self.mode = OokMode::Idle;
         }
     }
 
@@ -473,12 +473,10 @@ mod tests {
             receiver.tick();
         };
 
-        // Check for preambule
-        assert!(msg[PREAMBLE_SIZE - 1] == MESSAGE_START_BYTE, "{:?}", msg);
         // Check if length matches
-        assert!(msg[PREAMBLE_SIZE] as usize == n_bytes, "{:?}", msg);
+        assert!(msg[0] as usize == n_bytes, "{:?}", msg);
         // Check if data was transmitted successfully
-        assert!(&msg[MESSAGE_OFFSET..] == data);
+        assert!(&msg[1..] == data, "{:?}\n{:?}", &msg[1..], data);
     }
 
     #[test]
