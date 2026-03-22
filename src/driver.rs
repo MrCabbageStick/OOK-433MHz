@@ -304,7 +304,7 @@ where
     /// Return None when not enough bits to make a byte
     fn get_byte(&mut self, bit: u8) -> Option<u8> {
         // Append bit to byte
-        // Use onnly 6 ls bits
+        // Use only 6 ls bits
         self.rx_byte |= bit << (5 - self.rx_bit_index);
         self.rx_bit_index += 1;
 
@@ -322,7 +322,7 @@ where
             return true;
         }
 
-        self.rx_byte |= bit << (5 - self.rx_bit_index);
+        self.rx_byte |= bit << (7 - self.rx_bit_index);
         self.rx_bit_index += 1;
 
         // Full byte
@@ -331,9 +331,12 @@ where
                 self.rx_message_started = true;
                 self.rx_byte = 0;
                 self.rx_bit_index = 0;
-                // Return false so this bit ius not used in message data
+                // Return false so this bit is not used in message data
                 return false;
             }
+
+            self.rx_byte = 0;
+            self.rx_bit_index = 0;
             // TODO: I should discard message here probably
         }
 
@@ -641,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn syncing() {
+    fn syncing_with_every_possible_preceeding_byte() {
         let mut possible_preceding_bytes: [u8; 256] = [0; 256];
         (0..=255)
             .enumerate()
