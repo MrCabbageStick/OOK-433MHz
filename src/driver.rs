@@ -130,7 +130,9 @@ where
             self.tx_buf.as_slice()
         };
 
-        let state = (byte_source[self.tx_buf_index] >> (7 - self.tx_bit_index)) & 1 == 1;
+        // State bit as bool, most significant first
+        // Use only 6 bits of a byte
+        let state = (byte_source[self.tx_buf_index] >> (5 - self.tx_bit_index)) & 1 == 1;
 
         self.set_tx_state(state);
 
@@ -144,7 +146,7 @@ where
 
         self.tx_bit_index += 1;
         // If byte ends
-        if self.tx_bit_index >= 8 {
+        if self.tx_bit_index >= 6 {
             self.tx_bit_index = 0;
 
             // Increment buf index
@@ -248,15 +250,16 @@ where
         Err(ReceiverError::MessageNotReady)
     }
 
-    /// Handle tick to bit conversion
-    fn get_bit(&mut self, state: bool) -> Result<u8, ()> {
+    /// Handle tick to bit conversion\
+    /// Return None if not enought ticks read to make a byte
+    fn get_bit(&mut self, state: bool) -> Option<u8> {
         self.rx_n_ones_in_tick += state as u8;
 
         self.rx_current_tick += 1;
 
         // Skip if not enough ticks to read a bit
         if self.rx_current_tick < self.ticks_per_bit {
-            return Err(());
+            return None;
         }
 
         self.rx_current_tick = 0;
@@ -265,9 +268,10 @@ where
         let state_from_ticks = (self.rx_n_ones_in_tick >= (self.ticks_per_bit / 2)) as u8;
         self.rx_n_ones_in_tick = 0;
 
-        Ok(state_from_ticks)
+        Some(state_from_ticks)
     }
 
+    /// Take bit and check if receiver is synchronized
     fn get_synced(&mut self, bit: u8) -> bool {
         if self.rx_synced {
             return true;
@@ -277,7 +281,7 @@ where
         self.rx_sync_bits <<= 1;
         self.rx_sync_bits |= bit;
 
-        // Check if bits are 0b10 or 0b101,
+        // Check if ls bits are 0b10 or 0b101,
         // as this matches a sequence of repeating 1s and 0s
         if self.rx_sync_bits & 0b11 == 0b10 || self.rx_sync_bits & 0b111 == 0b101 {
             self.rx_sync_n_correct_bits += 1;
@@ -287,7 +291,6 @@ where
                 // Don't return true from here, because this is the last bit
                 // of sync sequnce
                 self.rx_synced = true;
-                // self.rx_buf.extend(SYNC_SEQUENCE.iter().copied());
             }
         } else {
             // It wasn't sync sequence after all
@@ -297,18 +300,21 @@ where
         return false;
     }
 
-    fn get_byte(&mut self, bit: u8) -> Result<u8, ()> {
+    /// Take bit and return a byte\
+    /// Return None when not enough bits to make a byte
+    fn get_byte(&mut self, bit: u8) -> Option<u8> {
         // Append bit to byte
-        self.rx_byte |= bit << (7 - self.rx_bit_index);
+        // Use onnly 6 ls bits
+        self.rx_byte |= bit << (5 - self.rx_bit_index);
         self.rx_bit_index += 1;
 
         // Full byte
-        if self.rx_bit_index >= 8 {
+        if self.rx_bit_index >= 6 {
             self.rx_bit_index = 0;
-            return Ok(self.rx_byte);
+            return Some(self.rx_byte);
         }
 
-        Err(())
+        None
     }
 
     /// Receive bit from `rx` and put it into `rx_buf`
@@ -329,7 +335,7 @@ where
             }
         }
 
-        let Ok(bit) = self.get_bit(rx_state) else {
+        let Some(bit) = self.get_bit(rx_state) else {
             return;
         };
 
@@ -338,7 +344,7 @@ where
             return;
         }
 
-        let Ok(_byte) = self.get_byte(bit) else {
+        let Some(_byte) = self.get_byte(bit) else {
             return;
         };
 
