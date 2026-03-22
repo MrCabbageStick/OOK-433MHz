@@ -308,13 +308,36 @@ where
         self.rx_byte |= bit << (5 - self.rx_bit_index);
         self.rx_bit_index += 1;
 
-        // Full byte
+        // Full 6 bits
         if self.rx_bit_index >= 6 {
             self.rx_bit_index = 0;
             return Some(self.rx_byte);
         }
 
         None
+    }
+
+    fn message_started(&mut self, bit: u8) -> bool {
+        if self.rx_message_started {
+            return true;
+        }
+
+        self.rx_byte |= bit << (5 - self.rx_bit_index);
+        self.rx_bit_index += 1;
+
+        // Full byte
+        if self.rx_bit_index >= 8 {
+            if self.rx_byte == MESSAGE_START_BYTE {
+                self.rx_message_started = true;
+                self.rx_byte = 0;
+                self.rx_bit_index = 0;
+                // Return false so this bit ius not used in message data
+                return false;
+            }
+            // TODO: I should discard message here probably
+        }
+
+        false
     }
 
     /// Receive bit from `rx` and put it into `rx_buf`
@@ -326,7 +349,6 @@ where
         let rx_state = self.read_rx_state();
 
         // Wait for at least one 1 to be detected
-        // This might help with synchronization
         if !self.rx_detected_one {
             if !rx_state {
                 return;
@@ -344,21 +366,24 @@ where
             return;
         }
 
+        if !self.message_started(bit) {
+            return;
+        }
+
         let Some(_byte) = self.get_byte(bit) else {
             return;
         };
 
-        if !self.rx_message_started {
-            // Check for start byte
-            if self.rx_byte == MESSAGE_START_BYTE {
-                self.rx_message_started = true;
-                // self.rx_buf.push(self.rx_byte).unwrap();
-                self.rx_byte = 0;
-            }
+        // if !self.rx_message_started {
+        //     // Check for start byte
+        //     if self.rx_byte == MESSAGE_START_BYTE {
+        //         self.rx_message_started = true;
+        //         self.rx_byte = 0;
+        //     }
 
-            // I think I should discard message here
-            return;
-        }
+        //     // I think I should discard message here
+        //     return;
+        // }
 
         match self.rx_decoder.next_nibble(self.rx_byte) {
             Ok(decoded_byte) => {
@@ -494,7 +519,7 @@ mod tests {
 
             n_ticks += 1;
 
-            current_byte |= (driver.tx.is_high().unwrap() as u8) << (7 - nth_bit);
+            current_byte |= (driver.tx.is_high().unwrap() as u8) << (5 - nth_bit);
 
             if n_ticks < driver.ticks_per_bit {
                 continue;
@@ -504,7 +529,7 @@ mod tests {
 
             nth_bit += 1;
 
-            if nth_bit >= 8 {
+            if nth_bit >= 6 {
                 nth_bit = 0;
 
                 // After sync bytes and message start byte
@@ -544,9 +569,13 @@ mod tests {
         let mut transmitter = OokDriver::new(MockPin::new(), MockPin::new());
 
         for message in MESSAGES {
-            let expected_tick_count = ((message.len() + MESSAGE_OFFSET) * 2 + PREAMBLE_SIZE)
-                * transmitter.ticks_per_bit as usize
-                * 8;
+            let expected_tick_count = (
+                // Encoded data and length byte, with 6 bits per byte
+                (message.len() + 1) * 2 * 6 
+                // Preamble with 6 bits per byte
+                + PREAMBLE_SIZE * 6
+            ) * transmitter.ticks_per_bit as usize;
+
             let mut n_ticks = 0usize;
 
             transmitter.send(message);
