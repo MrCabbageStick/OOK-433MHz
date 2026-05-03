@@ -90,7 +90,7 @@ where
             rx_error: None,
 
             mode: OokMode::Idle,
-            ticks_per_bit: 8,
+            ticks_per_bit: 7,
         }
     }
 
@@ -116,6 +116,7 @@ where
         self.mode = OokMode::Idle;
         self.tx_current_tick = 0;
         self.tx_preamble_sent = false;
+
         self.set_tx_state(false);
     }
 
@@ -265,7 +266,7 @@ where
         self.rx_current_tick = 0;
 
         // At least half of ticks should be 1 for bit to be 1
-        let state_from_ticks = (self.rx_n_ones_in_tick >= (self.ticks_per_bit / 2)) as u8;
+        let state_from_ticks = (self.rx_n_ones_in_tick > (self.ticks_per_bit / 2)) as u8;
         self.rx_n_ones_in_tick = 0;
 
         Some(state_from_ticks)
@@ -338,6 +339,8 @@ where
             self.rx_byte = 0;
             self.rx_bit_index = 0;
             // TODO: I should discard message here probably
+
+            self.mode = OokMode::Idle;
         }
 
         false
