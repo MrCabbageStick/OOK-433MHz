@@ -10,21 +10,23 @@ enum TxState {
     DataSent,
 }
 
-pub struct Transmitter<Pin: OutputPin> {
+pub struct Transmitter<const TICKS_PER_BIT: u8, Pin: OutputPin> {
     buffer: [u8; MAX_BUFFER_SIZE],
     message_bit_length: usize,
     bit_index: usize,
     state: TxState,
     pin: Pin,
+    ticks: u8,
 }
 
-impl<Pin: OutputPin> Transmitter<Pin> {
+impl<Pin: OutputPin, const TICKS_PER_BIT: u8> Transmitter<TICKS_PER_BIT, Pin> {
     pub fn new(pin: Pin) -> Self {
         Self {
             buffer: [0; MAX_BUFFER_SIZE],
             message_bit_length: 0,
             bit_index: 0,
             state: TxState::Idle,
+            ticks: 0,
             pin,
         }
     }
@@ -36,6 +38,19 @@ impl<Pin: OutputPin> Transmitter<Pin> {
     }
 
     pub fn transmit(&mut self) {
+        // Hold state for TICKS_PER_BIT
+        if self.ticks != 0 {
+            self.ticks += 1;
+
+            if self.ticks >= TICKS_PER_BIT {
+                self.ticks = 0;
+            }
+
+            return;
+        }
+
+        self.ticks += 1;
+
         match self.state {
             TxState::Idle => return,
             TxState::Syncing => {
@@ -138,14 +153,18 @@ mod tests {
 
     #[test]
     fn sync_bits() {
-        let mut driver = Transmitter::new(MockPin::new());
+        const TICKS_PER_BIT: u8 = 5;
+        let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
         driver.state = TxState::Syncing;
 
         let mut byte = 0u8;
 
         for _ in 0..(SYNC_SEQUENCE_BIT_LENGTH / 8) {
             for bi in 0..8 {
-                driver.transmit();
+                for _ in 0..TICKS_PER_BIT {
+                    driver.transmit();
+                }
+
                 byte |= (driver.pin.is_high().unwrap() as u8 & 0x1) << bi;
             }
             // Check for byte correctness
@@ -167,13 +186,16 @@ mod tests {
 
     #[test]
     fn message_start_byte() {
-        let mut driver = Transmitter::new(MockPin::new());
+        const TICKS_PER_BIT: u8 = 5;
+        let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
         driver.state = TxState::SendingStartByte;
 
         let mut byte = 0u8;
 
         for bi in 0..8 {
-            driver.transmit();
+            for _ in 0..TICKS_PER_BIT {
+                driver.transmit();
+            }
             byte |= (driver.pin.is_high().unwrap() as u8 & 0x1) << bi;
         }
 
@@ -192,18 +214,21 @@ mod tests {
 
     #[test]
     fn message_data() {
+        const TICKS_PER_BIT: u8 = 5;
         const DATA: [u8; 5] = [0x1, 0x10, 0xf8, 0xff, 0x00];
         let bit_length = DATA.len() * 8;
 
-        let mut driver = Transmitter::new(MockPin::new());
+        let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
         driver.state = TxState::SendingData;
         driver.message_bit_length = bit_length;
         driver.buffer[0..DATA.len()].copy_from_slice(&DATA);
 
         let mut received = [0u8; DATA.len()];
 
-        for bi in 0..bit_length {
-            driver.transmit();
+        for bi in 0..bit_length as usize {
+            for _ in 0..TICKS_PER_BIT {
+                driver.transmit();
+            }
 
             let byte_i = bi / 8;
             let bit_i = bi % 8;
@@ -222,5 +247,33 @@ mod tests {
             matches!(driver.state, TxState::DataSent),
             "Transmitter failed to move to the next state"
         )
+    }
+
+    #[test]
+    fn ticks_per_bit() {
+        const TICKS_PER_BIT: u8 = 8;
+        const DATA: [u8; 1] = [0xaa];
+        let bit_length = DATA.len() * 8;
+
+        let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
+        driver.state = TxState::SendingData;
+        driver.message_bit_length = bit_length;
+        driver.buffer[0..DATA.len()].copy_from_slice(&DATA);
+
+        for bit_i in 0..bit_length {
+            let data_bit = (DATA[0] >> bit_i) & 0x1;
+
+            for tick_i in 0..TICKS_PER_BIT {
+                driver.transmit();
+
+                let state = driver.pin.is_high().unwrap() as u8 & 0x1;
+
+                assert!(
+                    state == data_bit,
+                    "Expected {data_bit}, but got {state} on {tick_i} tick in {bit_i} bit of 0b{:b}",
+                    DATA[0]
+                );
+            }
+        }
     }
 }
