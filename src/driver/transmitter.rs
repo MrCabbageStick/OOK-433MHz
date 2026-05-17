@@ -38,13 +38,21 @@ impl<Pin: OutputPin> Transmitter<Pin> {
     pub fn transmit(&mut self) {
         match self.state {
             TxState::Idle => return,
-
-            TxState::Syncing => self.send_sync(),
-
-            TxState::SendingStartByte => self.send_start_byte(),
-
-            TxState::SendingData => self.send_data(),
-
+            TxState::Syncing => {
+                if self.send_sync() {
+                    self.state = TxState::SendingStartByte;
+                }
+            }
+            TxState::SendingStartByte => {
+                if self.send_start_byte() {
+                    self.state = TxState::SendingData
+                }
+            }
+            TxState::SendingData => {
+                if self.send_data() {
+                    self.state = TxState::DataSent
+                }
+            }
             TxState::DataSent => {
                 self.cleanup();
             }
@@ -62,9 +70,9 @@ impl<Pin: OutputPin> Transmitter<Pin> {
     }
 
     /// Sends bits of the synchronization bytes
-    /// and, when all are sent, moves the state to `SendingStartByte`\
+    /// and, when all are sent, returns true
     /// Sends least significant bits first
-    fn send_sync(&mut self) {
+    fn send_sync(&mut self) -> bool {
         // Extract 7 ls bits to not use % operator
         let bit = self.bit_index & 0x7;
 
@@ -76,14 +84,16 @@ impl<Pin: OutputPin> Transmitter<Pin> {
         // If synced clean bit_index and move along
         if self.bit_index >= SYNC_SEQUENCE_BIT_LENGTH as usize {
             self.bit_index = 0;
-            self.state = TxState::SendingStartByte;
+            return true;
         }
+
+        false
     }
 
     /// Sends bits of the message start byte
-    /// and, when all are sent, moves the state to `SendingData`\
+    /// and, when all are sent, returns true
     /// Sends least significant bits first
-    fn send_start_byte(&mut self) {
+    fn send_start_byte(&mut self) -> bool {
         let state = (MESSAGE_START_BYTE >> self.bit_index) & 0x1;
         self.set_pin_state(state != 0);
 
@@ -91,14 +101,16 @@ impl<Pin: OutputPin> Transmitter<Pin> {
 
         if self.bit_index >= 8 {
             self.bit_index = 0;
-            self.state = TxState::SendingData;
+            return true;
         }
+
+        false
     }
 
     /// Sends bits of the message
-    /// and, when all are sent, moves the state to `DataSent`\
+    /// and, when all are sent, returns true
     /// Sends least significant bits first
-    fn send_data(&mut self) {
+    fn send_data(&mut self) -> bool {
         let byte = self.bit_index >> 3;
         let bit = self.bit_index & 0x7;
 
@@ -109,8 +121,10 @@ impl<Pin: OutputPin> Transmitter<Pin> {
 
         if self.bit_index >= self.message_bit_length {
             self.bit_index = 0;
-            self.state = TxState::DataSent;
+            return true;
         }
+
+        false
     }
 }
 
