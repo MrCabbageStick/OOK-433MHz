@@ -7,11 +7,12 @@ enum TxState {
     Syncing,
     SendingStartByte,
     SendingData,
+    DataSent,
 }
 
 pub struct Transmitter<Pin: OutputPin> {
     buffer: [u8; MAX_BUFFER_SIZE],
-    message_length: usize,
+    message_bit_length: usize,
     bit_index: usize,
     state: TxState,
     pin: Pin,
@@ -21,7 +22,7 @@ impl<Pin: OutputPin> Transmitter<Pin> {
     pub fn new(pin: Pin) -> Self {
         Self {
             buffer: [0; MAX_BUFFER_SIZE],
-            message_length: 0,
+            message_bit_length: 0,
             bit_index: 0,
             state: TxState::Idle,
             pin,
@@ -30,7 +31,7 @@ impl<Pin: OutputPin> Transmitter<Pin> {
 
     pub fn cleanup(&mut self) {
         self.bit_index = 0;
-        self.message_length = 0;
+        self.message_bit_length = 0;
         self.state = TxState::Idle;
     }
 
@@ -42,7 +43,11 @@ impl<Pin: OutputPin> Transmitter<Pin> {
 
             TxState::SendingStartByte => self.send_start_byte(),
 
-            TxState::SendingData => {}
+            TxState::SendingData => self.send_data(),
+
+            TxState::DataSent => {
+                self.cleanup();
+            }
         }
     }
 
@@ -59,7 +64,7 @@ impl<Pin: OutputPin> Transmitter<Pin> {
     /// Sends bits of the synchronization bytes
     /// and, when all are sent, moves the state to `SendingStartByte`\
     /// Sends least significant bits first
-    pub fn send_sync(&mut self) {
+    fn send_sync(&mut self) {
         // Extract 7 ls bits to not use % operator
         let bit = self.bit_index & 0x7;
 
@@ -78,7 +83,7 @@ impl<Pin: OutputPin> Transmitter<Pin> {
     /// Sends bits of the message start byte
     /// and, when all are sent, moves the state to `SendingData`\
     /// Sends least significant bits first
-    pub fn send_start_byte(&mut self) {
+    fn send_start_byte(&mut self) {
         let state = (MESSAGE_START_BYTE >> self.bit_index) & 0x1;
         self.set_pin_state(state != 0);
 
@@ -87,6 +92,24 @@ impl<Pin: OutputPin> Transmitter<Pin> {
         if self.bit_index >= 8 {
             self.bit_index = 0;
             self.state = TxState::SendingData;
+        }
+    }
+
+    /// Sends bits of the message
+    /// and, when all are sent, moves the state to `DataSent`\
+    /// Sends least significant bits first
+    fn send_data(&mut self) {
+        let byte = self.bit_index >> 3;
+        let bit = self.bit_index & 0x7;
+
+        let state = (self.buffer[byte] >> bit) & 0x1;
+        self.set_pin_state(state != 0);
+
+        self.bit_index += 1;
+
+        if self.bit_index >= self.message_bit_length {
+            self.bit_index = 0;
+            self.state = TxState::DataSent;
         }
     }
 }
@@ -149,6 +172,40 @@ mod tests {
         // Check if driver moved to the next state
         assert!(
             matches!(driver.state, TxState::SendingData),
+            "Transmitter failed to move to the next state"
+        )
+    }
+
+    #[test]
+    fn message_data() {
+        const DATA: [u8; 5] = [0x1, 0x10, 0xf8, 0xff, 0x00];
+        let bit_length = DATA.len() * 8;
+
+        let mut driver = Transmitter::new(MockPin::new());
+        driver.state = TxState::SendingData;
+        driver.message_bit_length = bit_length;
+        driver.buffer[0..DATA.len()].copy_from_slice(&DATA);
+
+        let mut received = [0u8; DATA.len()];
+
+        for bi in 0..bit_length {
+            driver.transmit();
+
+            let byte_i = bi / 8;
+            let bit_i = bi % 8;
+
+            let state = driver.pin.is_high().unwrap() as u8 & 0x1;
+
+            received[byte_i] |= state << bit_i;
+        }
+
+        assert!(
+            DATA == received,
+            "Received data ({received:?}) does not match the source data ({DATA:?})"
+        );
+
+        assert!(
+            matches!(driver.state, TxState::DataSent),
             "Transmitter failed to move to the next state"
         )
     }
