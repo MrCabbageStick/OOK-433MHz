@@ -1,7 +1,14 @@
 use embedded_hal::digital::v2::OutputPin;
 
-use crate::consts::{MAX_BUFFER_SIZE, MESSAGE_START_BYTE, SYNC_BYTE, SYNC_SEQUENCE_BIT_LENGTH};
+use crate::{
+    consts::{
+        MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, MESSAGE_START_BYTE, SYNC_BYTE,
+        SYNC_SEQUENCE_BIT_LENGTH,
+    },
+    data_coding::radio_head_4b6b::encode_in_place,
+};
 
+#[derive(Debug)]
 enum TxState {
     Idle,
     Syncing,
@@ -141,13 +148,43 @@ impl<Pin: OutputPin, const TICKS_PER_BIT: u8> Transmitter<TICKS_PER_BIT, Pin> {
 
         false
     }
+
+    pub fn send(&mut self, bytes: &[u8]) -> Option<usize> {
+        // n_bytes = max(bytes.len(), MAX_MESSAGE_LENGTH)
+        let n_bytes = if bytes.len() > MAX_MESSAGE_LENGTH {
+            MAX_MESSAGE_LENGTH
+        } else {
+            bytes.len()
+        };
+
+        // Set message length as first byte
+        self.buffer[0] = n_bytes as u8;
+        // Populate buffer
+        self.buffer[1..=n_bytes].copy_from_slice(&bytes[0..n_bytes]);
+
+        // (n_bytes + message_size) * encoding overhead * 8 bits per byte
+        self.message_bit_length = (n_bytes + 1) * 8 * 2;
+
+        // Encode data
+        match encode_in_place(&mut self.buffer, n_bytes + 1) {
+            Ok(_) => {
+                self.state = TxState::Syncing;
+                Some(n_bytes)
+            }
+            Err(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use embedded_hal::digital::v2::InputPin;
 
-    use crate::{consts::MESSAGE_START_BYTE, mock_pin::MockPin};
+    use crate::{
+        consts::{MESSAGE_OFFSET, MESSAGE_START_BYTE},
+        data_coding::radio_head_4b6b::decode_in_place,
+        mock_pin::MockPin,
+    };
 
     use super::*;
 
@@ -275,5 +312,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn send() {
+        const TICKS_PER_BIT: u8 = 8;
+        const DATA: &[u8; 13] = b"Hello, there!";
+
+        let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
+
+        driver.send(DATA);
+
+        const ENCODED_LENGTH: usize = (DATA.len() + 1) * 2;
+        let mut decoded_buf = [0u8; ENCODED_LENGTH];
+        decoded_buf.copy_from_slice(&driver.buffer[0..ENCODED_LENGTH]);
+
+        assert!(
+            decode_in_place(&mut decoded_buf).is_ok(),
+            "Unable to decode buffer"
+        );
+
+        assert!(
+            decoded_buf[0] == DATA.len() as u8,
+            "First bytes does not code for message size, expected {}, but got {}",
+            DATA.len(),
+            decoded_buf[0]
+        );
+
+        assert!(
+            &decoded_buf[MESSAGE_OFFSET..=DATA.len()] == DATA,
+            "Decoded data does not equal source data, expected {:?}, but got {:?}",
+            DATA,
+            &decoded_buf[MESSAGE_OFFSET..=DATA.len()]
+        )
     }
 }
