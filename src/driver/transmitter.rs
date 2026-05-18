@@ -141,6 +141,12 @@ impl<Pin: OutputPin, const TICKS_PER_BIT: u8> Transmitter<TICKS_PER_BIT, Pin> {
 
         self.bit_index += 1;
 
+        // Send 6 bits out of every byte
+        // as encoding uses only 6 bits
+        if bit == 5 {
+            self.bit_index += 2; // Skip 2 bits
+        }
+
         if self.bit_index >= self.message_bit_length {
             self.bit_index = 0;
             return true;
@@ -163,6 +169,8 @@ impl<Pin: OutputPin, const TICKS_PER_BIT: u8> Transmitter<TICKS_PER_BIT, Pin> {
         self.buffer[1..=n_bytes].copy_from_slice(&bytes[0..n_bytes]);
 
         // (n_bytes + message_size) * encoding overhead * 8 bits per byte
+        // Even though encoding uses only 6 bits of every byte
+        // set value to number of all bits in bytes
         self.message_bit_length = (n_bytes + 1) * 8 * 2;
 
         // Encode data
@@ -252,7 +260,8 @@ mod tests {
     #[test]
     fn message_data() {
         const TICKS_PER_BIT: u8 = 5;
-        const DATA: [u8; 5] = [0x1, 0x10, 0xf8, 0xff, 0x00];
+        // Use only 6 ls bits
+        const DATA: [u8; 5] = [0x1, 0x10, 0x38, 0x3f, 0x00];
         let bit_length = DATA.len() * 8;
 
         let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
@@ -262,13 +271,16 @@ mod tests {
 
         let mut received = [0u8; DATA.len()];
 
-        for bi in 0..bit_length as usize {
+        // After encoding only 6 bits of every byte will be sent
+        let n_bits_to_send = DATA.len() * 6;
+
+        for bi in 0..n_bits_to_send as usize {
             for _ in 0..TICKS_PER_BIT {
                 driver.transmit();
             }
 
-            let byte_i = bi / 8;
-            let bit_i = bi % 8;
+            let byte_i = bi / 6;
+            let bit_i = bi % 6;
 
             let state = driver.pin.is_high().unwrap() as u8 & 0x1;
 
