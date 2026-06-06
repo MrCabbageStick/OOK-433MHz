@@ -187,175 +187,232 @@ impl<Pin: OutputPin, const TICKS_PER_BIT: u8> Transmitter<TICKS_PER_BIT, Pin> {
 #[cfg(test)]
 mod tests {
     use embedded_hal::digital::v2::InputPin;
+    use heapless::Vec;
 
     use crate::{
-        consts::{MESSAGE_OFFSET, MESSAGE_START_BYTE},
-        data_coding::radio_head_4b6b::decode_in_place,
+        consts::{MESSAGE_OFFSET, MESSAGE_START_BYTE, SYNC_BYTE, SYNC_SEQUENCE_BIT_LENGTH},
+        data_coding::radio_head_4b6b::{RunningDecoder, RunningDecoderError, decode_in_place},
         mock_pin::MockPin,
     };
 
     use super::*;
 
+    const TICKS_PER_BIT: u8 = 5;
+
+    /// Advance the transmitter by exactly one bit period and return the
+    /// pin state that was set at the **start** of that period.
+    fn tick_one_bit(driver: &mut Transmitter<TICKS_PER_BIT, MockPin>) -> bool {
+        // First tick: transmitter sets the pin and increments internal tick counter
+        driver.transmit();
+        let state = driver.pin.is_high().unwrap();
+
+        // Remaining ticks: transmitter holds state (no-ops internally)
+        for _ in 1..TICKS_PER_BIT {
+            driver.transmit();
+            // Pin must stay stable during the hold ticks
+            assert_eq!(
+                driver.pin.is_high().unwrap(),
+                state,
+                "Pin changed mid-bit-period"
+            );
+        }
+
+        state
+    }
+
+    /// Collect `n_bits` worth of bit periods into a byte (LSB first).
+    fn collect_bits(
+        driver: &mut Transmitter<TICKS_PER_BIT, MockPin>,
+        n_bits: usize,
+    ) -> Vec<bool, 64> {
+        let mut bits = Vec::new();
+        for _ in 0..n_bits {
+            bits.push(tick_one_bit(driver)).unwrap();
+        }
+        bits
+    }
+
+    fn bits_to_byte_lsb(bits: &[bool]) -> u8 {
+        assert!(bits.len() <= 8);
+        bits.iter()
+            .enumerate()
+            .fold(0u8, |acc, (i, &b)| acc | ((b as u8) << i))
+    }
+
+    // ── sync ────────────────────────────────────────────────────────────────
+
     #[test]
     fn sync_bits() {
-        const TICKS_PER_BIT: u8 = 5;
         let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
         driver.state = TxState::Syncing;
 
-        let mut byte = 0u8;
-
         for _ in 0..(SYNC_SEQUENCE_BIT_LENGTH / 8) {
-            for bi in 0..8 {
-                for _ in 0..TICKS_PER_BIT {
-                    driver.transmit();
-                }
+            let bits: Vec<bool, 8> = (0..8).map(|_| tick_one_bit(&mut driver)).collect();
 
-                byte |= (driver.pin.is_high().unwrap() as u8 & 0x1) << bi;
-            }
-            // Check for byte correctness
-            assert!(
-                byte == SYNC_BYTE,
-                "Received sync byte (0x{:x}) does not match expected sync byte (0x{SYNC_BYTE:x})",
-                byte
+            let byte = bits_to_byte_lsb(&bits);
+            assert_eq!(
+                byte, SYNC_BYTE,
+                "Sync byte mismatch: got 0x{byte:02x}, expected 0x{SYNC_BYTE:02x}"
             );
-
-            byte = 0;
         }
 
-        // Check if driver moved to the next state
         assert!(
             matches!(driver.state, TxState::SendingStartByte),
-            "Transmitter failed to move to the next state"
-        )
+            "Expected SendingStartByte after sync, got {:?}",
+            driver.state
+        );
     }
+
+    // ── start byte ──────────────────────────────────────────────────────────
 
     #[test]
     fn message_start_byte() {
-        const TICKS_PER_BIT: u8 = 5;
         let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
         driver.state = TxState::SendingStartByte;
 
-        let mut byte = 0u8;
+        let bits: Vec<bool, 8> = (0..8).map(|_| tick_one_bit(&mut driver)).collect();
+        let byte = bits_to_byte_lsb(&bits);
 
-        for bi in 0..8 {
-            for _ in 0..TICKS_PER_BIT {
-                driver.transmit();
-            }
-            byte |= (driver.pin.is_high().unwrap() as u8 & 0x1) << bi;
-        }
-
-        assert!(
-            byte == MESSAGE_START_BYTE,
-            "Received mesage start byte byte (0x{:x}) does not match expected byte (0x{MESSAGE_START_BYTE:x})",
-            byte
+        assert_eq!(
+            byte, MESSAGE_START_BYTE,
+            "Start byte mismatch: got 0x{byte:02x}, expected 0x{MESSAGE_START_BYTE:02x}"
         );
 
-        // Check if driver moved to the next state
         assert!(
             matches!(driver.state, TxState::SendingData),
-            "Transmitter failed to move to the next state"
-        )
+            "Expected SendingData after start byte, got {:?}",
+            driver.state
+        );
     }
+
+    // ── data ────────────────────────────────────────────────────────────────
 
     #[test]
     fn message_data() {
-        const TICKS_PER_BIT: u8 = 5;
-        // Use only 6 ls bits
-        const DATA: [u8; 5] = [0x1, 0x10, 0x38, 0x3f, 0x00];
-        let bit_length = DATA.len() * 8;
+        // Values chosen to check all 6 useful bits (encoding uses bits 0–5 only)
+        const DATA: [u8; 5] = [0x01, 0x10, 0x38, 0x3f, 0x00];
+
+        let bit_length = DATA.len() * 8; // matches what `send()` would set
 
         let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
         driver.state = TxState::SendingData;
         driver.message_bit_length = bit_length;
-        driver.buffer[0..DATA.len()].copy_from_slice(&DATA);
+        driver.buffer[..DATA.len()].copy_from_slice(&DATA);
 
         let mut received = [0u8; DATA.len()];
 
-        // After encoding only 6 bits of every byte will be sent
-        let n_bits_to_send = DATA.len() * 6;
-
-        for bi in 0..n_bits_to_send as usize {
-            for _ in 0..TICKS_PER_BIT {
-                driver.transmit();
+        // send_data sends bits 0–5 of each byte and skips bits 6–7
+        for byte_i in 0..DATA.len() {
+            for bit_i in 0..6usize {
+                let state = tick_one_bit(&mut driver);
+                received[byte_i] |= (state as u8) << bit_i;
             }
-
-            let byte_i = bi / 6;
-            let bit_i = bi % 6;
-
-            let state = driver.pin.is_high().unwrap() as u8 & 0x1;
-
-            received[byte_i] |= state << bit_i;
         }
 
-        assert!(
-            DATA == received,
-            "Received data ({received:?}) does not match the source data ({DATA:?})"
+        assert_eq!(
+            DATA, received,
+            "Received data {received:?} does not match source {DATA:?}"
         );
 
         assert!(
             matches!(driver.state, TxState::DataSent),
-            "Transmitter failed to move to the next state"
-        )
+            "Expected DataSent after all data bits, got {:?}",
+            driver.state
+        );
     }
 
     #[test]
+    fn data_sent_transitions_to_idle() {
+        let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
+        driver.state = TxState::DataSent;
+
+        // One full bit period in DataSent should trigger cleanup -> Idle
+        tick_one_bit(&mut driver);
+
+        assert!(
+            matches!(driver.state, TxState::Idle),
+            "Expected Idle after DataSent tick, got {:?}",
+            driver.state
+        );
+    }
+
+    // ── ticks_per_bit ───────────────────────────────────────────────────────
+
+    #[test]
     fn ticks_per_bit() {
-        const TICKS_PER_BIT: u8 = 8;
+        const TICKS: u8 = 8;
         const DATA: [u8; 1] = [0xaa];
         let bit_length = DATA.len() * 8;
 
-        let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
+        let mut driver = Transmitter::<TICKS, _>::new(MockPin::new());
         driver.state = TxState::SendingData;
         driver.message_bit_length = bit_length;
-        driver.buffer[0..DATA.len()].copy_from_slice(&DATA);
+        driver.buffer[..DATA.len()].copy_from_slice(&DATA);
 
-        for bit_i in 0..bit_length {
-            let data_bit = (DATA[0] >> bit_i) & 0x1;
+        for bit_i in 0..6usize {
+            let expected = (DATA[0] >> bit_i) & 0x1;
 
-            for tick_i in 0..TICKS_PER_BIT {
+            for tick_i in 0..TICKS {
                 driver.transmit();
-
-                let state = driver.pin.is_high().unwrap() as u8 & 0x1;
-
-                assert!(
-                    state == data_bit,
-                    "Expected {data_bit}, but got {state} on {tick_i} tick in {bit_i} bit of 0b{:b}",
-                    DATA[0]
+                let actual = driver.pin.is_high().unwrap() as u8;
+                assert_eq!(
+                    actual, expected,
+                    "tick {tick_i} of bit {bit_i}: expected {expected}, got {actual}"
                 );
             }
         }
     }
 
+    // ── send() integration ──────────────────────────────────────────────────
+
     #[test]
-    fn send() {
-        const TICKS_PER_BIT: u8 = 8;
-        const DATA: &[u8; 13] = b"Hello, there!";
+    fn send_encodes_and_sets_state() {
+        const DATA: &[u8] = b"Hello, there!";
 
         let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
+        let n = driver.send(DATA).expect("send() returned None");
 
-        driver.send(DATA);
-
-        const ENCODED_LENGTH: usize = (DATA.len() + 1) * 2;
-        let mut decoded_buf = [0u8; ENCODED_LENGTH];
-        decoded_buf.copy_from_slice(&driver.buffer[0..ENCODED_LENGTH]);
-
+        assert_eq!(n, DATA.len(), "send() reported wrong byte count");
         assert!(
-            decode_in_place(&mut decoded_buf).is_ok(),
-            "Unable to decode buffer"
+            matches!(driver.state, TxState::Syncing),
+            "Expected Syncing after send(), got {:?}",
+            driver.state
         );
 
-        assert!(
-            decoded_buf[0] == DATA.len() as u8,
-            "First bytes does not code for message size, expected {}, but got {}",
+        // Decode the buffer and verify contents
+        const ENCODED_LEN: usize = (DATA.len() + 1) * 2;
+        let mut decoded = [0u8; ENCODED_LEN];
+        decoded.copy_from_slice(&driver.buffer[..ENCODED_LEN]);
+
+        decode_in_place(&mut decoded).expect("decode_in_place failed");
+
+        assert_eq!(
+            decoded[0],
+            DATA.len() as u8,
+            "Length byte mismatch: expected {}, got {}",
             DATA.len(),
-            decoded_buf[0]
+            decoded[0]
         );
-
-        assert!(
-            &decoded_buf[MESSAGE_OFFSET..=DATA.len()] == DATA,
-            "Decoded data does not equal source data, expected {:?}, but got {:?}",
+        assert_eq!(
+            &decoded[MESSAGE_OFFSET..MESSAGE_OFFSET + DATA.len()],
             DATA,
-            &decoded_buf[MESSAGE_OFFSET..=DATA.len()]
-        )
+            "Decoded payload does not match source"
+        );
     }
+
+    #[test]
+    fn send_truncates_oversized_message() {
+        let oversized: Vec<u8, { MAX_MESSAGE_LENGTH + 1 }> =
+            (0..MAX_MESSAGE_LENGTH + 1).map(|i| i as u8).collect();
+
+        let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
+        let n = driver.send(&oversized).expect("send() returned None");
+
+        assert_eq!(
+            n, MAX_MESSAGE_LENGTH,
+            "send() should truncate to MAX_MESSAGE_LENGTH"
+        );
+    }
+
+    // ── full round-trip ─────────────────────────────────────────────────────
 }
