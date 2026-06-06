@@ -38,20 +38,22 @@ pub mod radio_head_4b6b {
         Ok(())
     }
 
-    pub fn decode_in_place(data: &mut [u8]) -> Result<(), RH4b6bDecodeError> {
+    pub fn decode_in_place(data: &mut [u8]) -> Result<usize, RH4b6bDecodeError> {
         // Not even
         if data.len() & 0x1 == 1 {
             return Err(RH4b6bDecodeError::DataSizeNotEven);
         }
 
-        for i in 0..data.len() / 2 {
+        let decoded_data_length = data.len() / 2;
+
+        for i in 0..decoded_data_length {
             let ls_symbol = data[i * 2];
             let ms_symbol = data[i * 2 + 1];
 
             data[i] = symbols_to_byte(ls_symbol, ms_symbol)?;
         }
 
-        Ok(())
+        Ok(decoded_data_length)
     }
 
     pub fn symbols_to_byte(ls_symbol: u8, ms_symbol: u8) -> Result<u8, RH4b6bDecodeError> {

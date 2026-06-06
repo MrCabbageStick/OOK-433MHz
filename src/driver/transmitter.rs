@@ -59,7 +59,10 @@ impl<Pin: OutputPin, const TICKS_PER_BIT: u8> Transmitter<TICKS_PER_BIT, Pin> {
         self.ticks += 1;
 
         match self.state {
-            TxState::Idle => return,
+            TxState::Idle => {
+                // Dont tick on idle
+                self.ticks = 0;
+            }
             TxState::Syncing => {
                 if self.send_sync() {
                     self.state = TxState::SendingStartByte;
@@ -200,7 +203,7 @@ mod tests {
     const TICKS_PER_BIT: u8 = 5;
 
     /// Advance the transmitter by exactly one bit period and return the
-    /// pin state that was set at the **start** of that period.
+    /// pin state that was set at the *start* of that period.
     fn tick_one_bit(driver: &mut Transmitter<TICKS_PER_BIT, MockPin>) -> bool {
         // First tick: transmitter sets the pin and increments internal tick counter
         driver.transmit();
@@ -415,4 +418,84 @@ mod tests {
     }
 
     // ── full round-trip ─────────────────────────────────────────────────────
+
+    /// Drive the transmitter through entire sending process and decode
+    /// every bit off the wire, then verify the recovered payload.
+    #[test]
+    fn full_transmission_round_trip() {
+        const DATA: &[u8] = b"round trip!";
+
+        let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
+        driver.send(DATA).unwrap();
+
+        // Skip sync bits
+        for _ in 0..SYNC_SEQUENCE_BIT_LENGTH {
+            tick_one_bit(&mut driver);
+        }
+
+        assert!(
+            matches!(driver.state, TxState::SendingStartByte),
+            "Driver should be in a 'SendingStartByte' phase, but is in: '{:?}'",
+            driver.state
+        );
+
+        // Skip start byte
+        for _ in 0..8 {
+            tick_one_bit(&mut driver);
+        }
+
+        assert!(
+            matches!(driver.state, TxState::SendingData),
+            "Driver should be in a 'SendingStartByte' phase, but is in: '{:?}'",
+            driver.state
+        );
+
+        // Collect encoded payload bytes (6 bits each, LSB first)
+        let n_encoded_bytes = (DATA.len() + 1) * 2;
+        let mut encoded_bytes = Vec::<u8, 64>::new();
+
+        for _ in 0..n_encoded_bytes {
+            let mut byte = 0u8;
+
+            for bit_i in 0..6usize {
+                let state = tick_one_bit(&mut driver);
+                byte |= (state as u8) << bit_i;
+            }
+
+            encoded_bytes.push(byte).unwrap();
+        }
+
+        assert!(
+            matches!(driver.state, TxState::DataSent),
+            "Transmitter state should be 'DataSent', but is {:?}",
+            driver.state
+        );
+
+        // Next tick should be cleanup
+        driver.transmit();
+
+        assert!(
+            matches!(driver.state, TxState::Idle),
+            "Transmitter state should be 'Idle', but is {:?}",
+            driver.state
+        );
+
+        let decoded_size = match decode_in_place(&mut encoded_bytes) {
+            Ok(n) => n,
+            Err(e) => panic!("Error occured during decoding: {e:?}"),
+        };
+
+        let data_and_length_byte_size = DATA.len() + 1;
+
+        assert_eq!(
+            decoded_size, data_and_length_byte_size,
+            "Length byte mismatch"
+        );
+
+        assert_eq!(
+            &encoded_bytes[1..decoded_size],
+            DATA,
+            "Payload mismatch after round-trip"
+        );
+    }
 }
