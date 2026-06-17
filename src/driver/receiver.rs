@@ -238,10 +238,10 @@ mod tests {
             }
         }
 
-        assert!(!error_flag, "There was no error during syncing");
+        assert!(error_flag, "There was no error during syncing");
 
         assert!(
-            !matches!(driver.state, RxState::Idle),
+            matches!(driver.state, RxState::Idle),
             "Driver not cleaned up after sync error"
         );
     }
