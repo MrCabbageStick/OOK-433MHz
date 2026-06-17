@@ -2,8 +2,9 @@ use core::{error::Error, fmt::Display};
 
 use embedded_hal::digital::v2::InputPin;
 
-use crate::consts::{
-    MAX_BUFFER_SIZE, MESSAGE_OFFSET, MESSAGE_START_BYTE, SYNC_SEQUENCE_BIT_LENGTH,
+use crate::{
+    consts::{MAX_BUFFER_SIZE, MESSAGE_OFFSET, MESSAGE_START_BYTE, SYNC_SEQUENCE_BIT_LENGTH},
+    data_coding::radio_head_4b6b::{RunningDecoder, RunningDecoderError},
 };
 
 #[derive(Debug)]
@@ -13,12 +14,13 @@ enum RxState {
     Syncing,
     WaitingForStartByte,
     ReadingSize,
-    ReadingMessage,
+    ReadingMessage { message_size: u8 },
     MessageReceived { message_size: usize },
 }
 
 pub struct Receiver<const TICKS_PER_BIT: u8, Pin: InputPin> {
     buffer: [u8; MAX_BUFFER_SIZE],
+    buffer_byte_index: usize,
     bit_index: usize,
     state: RxState,
     pin: Pin,
@@ -26,6 +28,8 @@ pub struct Receiver<const TICKS_PER_BIT: u8, Pin: InputPin> {
     /// How many ticks in a bit where 1
     n1s_in_bit: u8,
     current_byte: u8,
+
+    decoder: RunningDecoder,
 }
 
 impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
@@ -38,6 +42,8 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
             n1s_in_bit: 0,
             pin,
             current_byte: 0,
+            buffer_byte_index: 0,
+            decoder: RunningDecoder::new(),
         }
     }
 
@@ -109,8 +115,15 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
                     return Err(err);
                 }
             },
-            RxState::ReadingSize => {}
-            RxState::ReadingMessage => {}
+            RxState::ReadingSize => match self.read_message_size() {
+                Ok((true, size)) => self.state = RxState::ReadingMessage { message_size: size },
+                Ok((false, _)) => {}
+                Err(err) => {
+                    self.cleanup();
+                    return Err(err);
+                }
+            },
+            RxState::ReadingMessage { message_size } => {}
             RxState::MessageReceived { message_size } => {
                 self.cleanup();
                 return Ok(&self.buffer[MESSAGE_OFFSET..message_size + MESSAGE_OFFSET]);
@@ -176,6 +189,37 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
 
         Ok(false)
     }
+
+    fn read_message_size(&mut self) -> Result<(bool, u8), ReceiverError> {
+        let Some(bit) = self.get_bit() else {
+            return Ok((false, 0));
+        };
+
+        self.current_byte |= bit << self.bit_index;
+        self.bit_index += 1;
+
+        if self.bit_index >= 6 {
+            self.bit_index = 0;
+
+            let decoder_res = self.decoder.next_nibble(self.current_byte);
+
+            self.current_byte = 0;
+
+            match decoder_res {
+                Err(RunningDecoderError::ByteNotReady) => {
+                    return Ok((false, 0));
+                }
+                Err(err) => {
+                    return Err(ReceiverError::DecoderError(err));
+                }
+                Ok(byte) => {
+                    return Ok((true, byte));
+                }
+            }
+        }
+
+        Ok((false, 0))
+    }
 }
 
 #[derive(Debug)]
@@ -185,6 +229,7 @@ pub enum ReceiverError {
     /// Sync signal is not  a repeating sequence of 1s and 0s
     SyncError,
     WrongStartByte,
+    DecoderError(RunningDecoderError),
 }
 
 #[cfg(test)]
@@ -193,6 +238,7 @@ mod tests {
 
     use crate::{
         consts::{MESSAGE_START_BYTE, SYNC_SEQUENCE_BIT_LENGTH},
+        data_coding::radio_head_4b6b::encode_in_place,
         driver::receiver::{Receiver, ReceiverError, RxState},
         mock_pin::MockPin,
     };
@@ -326,5 +372,43 @@ mod tests {
             matches!(driver.state, RxState::Idle),
             "Driver not cleaned up after message start byte error"
         );
+    }
+
+    #[test]
+    fn read_message_size() {
+        let mut driver = get_default_receiver();
+        driver.state = RxState::ReadingSize;
+
+        let size = 25u8;
+        let mut encoded_size = [size, 0];
+        encode_in_place(&mut encoded_size, 1).expect("Size buffer is too short for some reason?");
+
+        for bit_n in 0..encoded_size.len() * 6 {
+            let bit_i = bit_n % 6;
+            let byte_i = bit_n / 6;
+
+            let bit = (encoded_size[byte_i] >> bit_i) & 0x1;
+
+            driver.pin.set_state((bit == 1).into());
+
+            match tick_one_bit(&mut driver) {
+                Err(ReceiverError::DecoderError(err)) => {
+                    panic!("Decoder error on byte: {byte_i} on bit: {bit_i}. {err:?}")
+                }
+                _ => {}
+            }
+        }
+
+        match driver.state {
+            RxState::ReadingMessage { message_size } => {
+                assert!(
+                    message_size == size,
+                    "Decoded size ({message_size}) does not equal initial size ({size})"
+                );
+            }
+            state => {
+                panic!("Driver is in incorrect state: {state:?}")
+            }
+        }
     }
 }

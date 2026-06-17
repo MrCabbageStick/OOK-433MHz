@@ -99,6 +99,7 @@ pub mod radio_head_4b6b {
         }
     }
 
+    #[derive(Debug)]
     pub enum RunningDecoderError {
         UnknownSymbol(u8),
         ByteNotReady,
