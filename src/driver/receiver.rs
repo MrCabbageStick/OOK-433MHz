@@ -2,7 +2,9 @@ use core::{error::Error, fmt::Display};
 
 use embedded_hal::digital::v2::InputPin;
 
-use crate::consts::{MAX_BUFFER_SIZE, MESSAGE_OFFSET, SYNC_SEQUENCE_BIT_LENGTH};
+use crate::consts::{
+    MAX_BUFFER_SIZE, MESSAGE_OFFSET, MESSAGE_START_BYTE, SYNC_SEQUENCE_BIT_LENGTH,
+};
 
 #[derive(Debug)]
 enum RxState {
@@ -99,7 +101,14 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
                     return Err(err);
                 }
             },
-            RxState::WaitingForStartByte => {}
+            RxState::WaitingForStartByte => match self.wait_start_byte() {
+                Ok(true) => self.state = RxState::ReadingSize,
+                Ok(false) => {}
+                Err(err) => {
+                    self.cleanup();
+                    return Err(err);
+                }
+            },
             RxState::ReadingSize => {}
             RxState::ReadingMessage => {}
             RxState::MessageReceived { message_size } => {
@@ -142,6 +151,31 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
             Ok(false)
         }
     }
+
+    /// Wait for a byte, if it's a `MESSAGE_START_BYTE`
+    /// return `true`, if it's not return `Err(WrongStartByte)`.
+    /// If byte is not complete return `false`
+    fn wait_start_byte(&mut self) -> Result<bool, ReceiverError> {
+        let Some(bit) = self.get_bit() else {
+            return Ok(false);
+        };
+
+        self.current_byte |= bit << self.bit_index;
+        self.bit_index += 1;
+
+        if self.bit_index >= 8 {
+            if self.current_byte != MESSAGE_START_BYTE {
+                return Err(ReceiverError::WrongStartByte);
+            }
+
+            self.current_byte = 0;
+            self.bit_index = 0;
+
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
 }
 
 #[derive(Debug)]
@@ -150,6 +184,7 @@ pub enum ReceiverError {
     MessageNotReady,
     /// Sync signal is not  a repeating sequence of 1s and 0s
     SyncError,
+    WrongStartByte,
 }
 
 #[cfg(test)]
@@ -157,9 +192,8 @@ mod tests {
     use embedded_hal::digital::v2::OutputPin;
 
     use crate::{
-        consts::{SYNC_SEQUENCE, SYNC_SEQUENCE_BIT_LENGTH},
+        consts::{MESSAGE_START_BYTE, SYNC_SEQUENCE_BIT_LENGTH},
         driver::receiver::{Receiver, ReceiverError, RxState},
-        driver_old::OokMode::Receive,
         mock_pin::MockPin,
     };
 
@@ -243,6 +277,54 @@ mod tests {
         assert!(
             matches!(driver.state, RxState::Idle),
             "Driver not cleaned up after sync error"
+        );
+    }
+
+    #[test]
+    fn read_correct_message_start() {
+        let mut driver = get_default_receiver();
+        driver.state = RxState::WaitingForStartByte;
+
+        for i in 0..8 {
+            let bit = (MESSAGE_START_BYTE >> i) & 0x1;
+            driver.pin.set_state((bit == 1).into());
+
+            let res = tick_one_bit(&mut driver);
+
+            assert!(matches!(res, Ok(_)), "Error occured on bit #{i}: {bit}");
+        }
+
+        assert!(
+            !matches!(driver.state, RxState::WaitingForStartByte),
+            "Driver not moved to the next state from `RxState::WaitingForStartByte`"
+        )
+    }
+
+    #[test]
+    fn read_incorrect_message_start() {
+        let mut driver = get_default_receiver();
+        driver.state = RxState::WaitingForStartByte;
+
+        let mut error_flag = false;
+
+        for i in 0..8 {
+            let bit = (0xff >> i) & 0x1;
+            driver.pin.set_state((bit == 1).into());
+
+            match tick_one_bit(&mut driver) {
+                Ok(_) => {}
+                Err(_) => {
+                    error_flag = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(error_flag, "No error on incorrect start byte");
+
+        assert!(
+            matches!(driver.state, RxState::Idle),
+            "Driver not cleaned up after message start byte error"
         );
     }
 }
