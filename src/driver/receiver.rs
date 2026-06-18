@@ -27,7 +27,7 @@ pub struct Receiver<const TICKS_PER_BIT: u8, Pin: InputPin> {
     buffer_byte_index: usize,
     bit_index: usize,
     state: RxState,
-    pin: Pin,
+    pub pin: Pin,
     ticks: u8,
     /// How many ticks in a bit where 1
     n1s_in_bit: u8,

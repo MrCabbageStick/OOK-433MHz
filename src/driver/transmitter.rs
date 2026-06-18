@@ -22,7 +22,7 @@ pub struct Transmitter<const TICKS_PER_BIT: u8, Pin: OutputPin> {
     message_bit_length: usize,
     bit_index: usize,
     state: TxState,
-    pin: Pin,
+    pub pin: Pin,
     ticks: u8,
 }
 
@@ -36,6 +36,10 @@ impl<Pin: OutputPin, const TICKS_PER_BIT: u8> Transmitter<TICKS_PER_BIT, Pin> {
             ticks: 0,
             pin,
         }
+    }
+
+    pub fn is_idle(&self) -> bool {
+        matches!(self.state, TxState::Idle)
     }
 
     pub fn cleanup(&mut self) {

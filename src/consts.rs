@@ -8,7 +8,7 @@ pub const MESSAGE_START_BYTE: u8 = 0xCC;
 pub const SYNC_SEQUENCE: [u8; 2] = [0xAA, 0xAA];
 
 /// Alternating 1s ond 0s
-pub const SYNC_BYTE: u8 = 0xAA;
+pub const SYNC_BYTE: u8 = 0x55;
 
 /// Number of bits in sync signal needed to successfully sync
 pub const SYNC_SEQUENCE_BIT_LENGTH: u8 = 2 * 8;
