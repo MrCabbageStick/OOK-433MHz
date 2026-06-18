@@ -96,8 +96,9 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
                 // If one detected move to the next state
                 if self.get_pin_state() {
                     self.state = RxState::Syncing;
-                    // Bit was already from the transmitter's sync sequence
-                    self.current_byte = 1;
+                    // Tick was already from the transmitter's sync sequence
+                    self.n1s_in_bit += 1;
+                    self.ticks += 1;
                 }
             }
             RxState::Syncing => match self.sync() {
@@ -142,7 +143,7 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
             },
             RxState::MessageReceived { message_size } => {
                 self.cleanup();
-                return Ok(&self.buffer[MESSAGE_OFFSET..(message_size as usize) + MESSAGE_OFFSET]);
+                return Ok(&self.buffer[..message_size as usize]);
             }
         }
 
@@ -294,7 +295,9 @@ mod tests {
     use embedded_hal::digital::v2::OutputPin;
 
     use crate::{
-        consts::{MESSAGE_START_BYTE, SYNC_SEQUENCE_BIT_LENGTH},
+        consts::{
+            MESSAGE_OFFSET, MESSAGE_START_BYTE, SYNC_BYTE, SYNC_SEQUENCE, SYNC_SEQUENCE_BIT_LENGTH,
+        },
         data_coding::radio_head_4b6b::encode_in_place,
         driver::receiver::{Receiver, ReceiverError, RxState},
         mock_pin::MockPin,
@@ -510,6 +513,67 @@ mod tests {
             Initial: {MESSAGE:?}
             Decoded: {:?}",
             &driver.buffer[0..MESSAGE.len()]
-        )
+        );
+    }
+
+    #[test]
+    fn full_receiver_test() {
+        // === SETUP === //
+        const DATA_MESSAGE_OFFSET: usize = 5;
+        const MESSAGE: &[u8] = b"This is a test message";
+        // Sync sequence size + message start byte + size byte (encoded on 2 bytes) + encoded message size
+        const FULL_DATA_LENGTH: usize = SYNC_SEQUENCE.len() + 1 + 2 + MESSAGE.len() * 2;
+        let mut full_data = [0u8; FULL_DATA_LENGTH];
+        // Put epxtected byte sequence
+        full_data[0] = 0b01010101;
+        full_data[1] = 0b01010101;
+        full_data[2] = MESSAGE_START_BYTE;
+        // Put message size
+        full_data[3] = MESSAGE.len() as u8;
+        // Encode message size
+        encode_in_place(&mut full_data[3..5], 1).expect("Unable to encode message size");
+        // Put message
+        full_data[DATA_MESSAGE_OFFSET..DATA_MESSAGE_OFFSET + MESSAGE.len()]
+            .copy_from_slice(MESSAGE);
+        // Encode message part
+        encode_in_place(&mut full_data[DATA_MESSAGE_OFFSET..], MESSAGE.len())
+            .expect("Unable to encode message");
+
+        // === TEST === //
+        let mut driver = get_default_receiver();
+        // Prime the driver
+        let _ = driver.receive();
+
+        for byte_i in 0..full_data.len() {
+            // Number of bits in a 'byte'
+            // 8 for sync and start_byte,
+            // 6 for encoded data
+            let n_bits_from_byte = if byte_i < 3 { 8 } else { 6 };
+
+            for bit_i in 0..n_bits_from_byte {
+                let state = (full_data[byte_i] >> bit_i) & 0x1;
+                driver.pin.set_state((state == 1).into());
+
+                match tick_one_bit(&mut driver) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        panic!(
+                            "Receiver ecountered an error on byte {byte_i} in bit {bit_i}: {err:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        let message = driver
+            .receive()
+            .expect("Error occured when message should be present");
+
+        assert!(
+            message == MESSAGE,
+            "Messages are different
+            Initial:  {MESSAGE:?}
+            Received: {message:?}"
+        );
     }
 }
