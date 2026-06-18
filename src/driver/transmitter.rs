@@ -1,4 +1,5 @@
 use embedded_hal::digital::v2::OutputPin;
+use ufmt::derive::uDebug;
 
 use crate::{
     consts::{
@@ -8,7 +9,7 @@ use crate::{
     data_coding::radio_head_4b6b::encode_in_place,
 };
 
-#[derive(Debug)]
+#[derive(Debug, uDebug)]
 enum TxState {
     Idle,
     Syncing,

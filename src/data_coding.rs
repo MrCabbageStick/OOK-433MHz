@@ -1,4 +1,6 @@
 pub mod radio_head_4b6b {
+    use ufmt::derive::uDebug;
+
     /// 4 bit to 6 bit symbol converter table
     /// Used to convert the high and low nybbles of the transmitted data
     /// into 6 bit symbols for transmission. Each 6-bit symbol has 3 1s and 3 0s
@@ -99,7 +101,7 @@ pub mod radio_head_4b6b {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, uDebug)]
     pub enum RunningDecoderError {
         UnknownSymbol(u8),
         ByteNotReady,

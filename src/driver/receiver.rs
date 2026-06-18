@@ -1,6 +1,7 @@
 use core::{error::Error, fmt::Display};
 
 use embedded_hal::digital::v2::InputPin;
+use ufmt::derive::uDebug;
 
 use crate::{
     consts::{
@@ -11,7 +12,7 @@ use crate::{
     driver::receiver::ReceiverError::DecoderError,
 };
 
-#[derive(Debug)]
+#[derive(Debug, uDebug)]
 enum RxState {
     Idle,
     WaitingForOne,
@@ -57,6 +58,8 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
         self.n1s_in_bit = 0;
         self.state = RxState::Idle;
         self.current_byte = 0;
+        self.decoder.reset();
+        self.buffer_byte_index = 0;
     }
 
     fn get_pin_state(&self) -> bool {
@@ -279,7 +282,7 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, uDebug)]
 pub enum ReceiverError {
     /// Not an error per se, but an information
     MessageNotReady,
