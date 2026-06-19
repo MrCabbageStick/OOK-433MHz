@@ -22,6 +22,7 @@ pub struct Transmitter<const TICKS_PER_BIT: u8, Pin: OutputPin> {
     buffer: [u8; MAX_BUFFER_SIZE],
     message_bit_length: usize,
     bit_index: usize,
+    byte_index: usize,
     state: TxState,
     pub pin: Pin,
     ticks: u8,
@@ -33,6 +34,7 @@ impl<Pin: OutputPin, const TICKS_PER_BIT: u8> Transmitter<TICKS_PER_BIT, Pin> {
             buffer: [0; MAX_BUFFER_SIZE],
             message_bit_length: 0,
             bit_index: 0,
+            byte_index: 0,
             state: TxState::Idle,
             ticks: 0,
             pin,
@@ -45,6 +47,7 @@ impl<Pin: OutputPin, const TICKS_PER_BIT: u8> Transmitter<TICKS_PER_BIT, Pin> {
 
     pub fn cleanup(&mut self) {
         self.bit_index = 0;
+        self.byte_index = 0;
         self.message_bit_length = 0;
         self.state = TxState::Idle;
     }
@@ -141,22 +144,27 @@ impl<Pin: OutputPin, const TICKS_PER_BIT: u8> Transmitter<TICKS_PER_BIT, Pin> {
     /// and, when all are sent, returns true
     /// Sends least significant bits first
     fn send_data(&mut self) -> bool {
-        let byte = self.bit_index >> 3;
-        let bit = self.bit_index & 0x7;
+        // let byte = self.bit_index >> 3;
+        // let bit = self.bit_index & 0x7;
 
-        let state = (self.buffer[byte] >> bit) & 0x1;
+        let state = (self.buffer[self.byte_index] >> self.bit_index) & 0x1;
         self.set_pin_state(state != 0);
 
         self.bit_index += 1;
 
-        // Send 6 bits out of every byte
-        // as encoding uses only 6 bits
-        if bit == 5 {
-            self.bit_index += 2; // Skip 2 bits
+        // // Send 6 bits out of every byte
+        // // as encoding uses only 6 bits
+        // if bit == 5 {
+        //     self.bit_index += 2; // Skip 2 bits
+        // }
+        if self.bit_index >= 6 {
+            self.bit_index = 0;
+            self.byte_index += 1;
         }
 
-        if self.bit_index >= self.message_bit_length {
+        if self.byte_index * 6 + self.bit_index >= self.message_bit_length {
             self.bit_index = 0;
+            self.byte_index = 0;
             return true;
         }
 
@@ -176,10 +184,7 @@ impl<Pin: OutputPin, const TICKS_PER_BIT: u8> Transmitter<TICKS_PER_BIT, Pin> {
         // Populate buffer
         self.buffer[1..=n_bytes].copy_from_slice(&bytes[0..n_bytes]);
 
-        // (n_bytes + message_size) * encoding overhead * 8 bits per byte
-        // Even though encoding uses only 6 bits of every byte
-        // set value to number of all bits in bytes
-        self.message_bit_length = (n_bytes + 1) * 8 * 2;
+        self.message_bit_length = (n_bytes + 1) * 6 * 2;
 
         // Encode data
         match encode_in_place(&mut self.buffer, n_bytes + 1) {
@@ -300,7 +305,7 @@ mod tests {
         // Values chosen to check all 6 useful bits (encoding uses bits 0–5 only)
         const DATA: [u8; 5] = [0x01, 0x10, 0x38, 0x3f, 0x00];
 
-        let bit_length = DATA.len() * 8; // matches what `send()` would set
+        let bit_length = DATA.len() * 6; // matches what `send()` would set
 
         let mut driver = Transmitter::<TICKS_PER_BIT, _>::new(MockPin::new());
         driver.state = TxState::SendingData;
@@ -350,7 +355,7 @@ mod tests {
     fn ticks_per_bit() {
         const TICKS: u8 = 8;
         const DATA: [u8; 1] = [0xaa];
-        let bit_length = DATA.len() * 8;
+        let bit_length = DATA.len() * 6;
 
         let mut driver = Transmitter::<TICKS, _>::new(MockPin::new());
         driver.state = TxState::SendingData;

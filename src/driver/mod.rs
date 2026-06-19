@@ -21,7 +21,7 @@ mod combined_tests {
 
     #[test]
     fn transmit_and_receive() {
-        const MESSAGE: &[u8] = b"This is a test message.";
+        const MESSAGE: &[u8] = b"This is a test message, a long one, but could be longer!";
         // const N_TICKS: usize = (
         //         // 2 byte sync sequence + 1 byte message start byte, both 8 bit per byte
         //         (2 + 1) * 8

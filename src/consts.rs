@@ -1,6 +1,6 @@
 /// Max size of tx and rx buffers\
 /// Including encoding and headers
-pub const MAX_BUFFER_SIZE: usize = 96;
+pub const MAX_BUFFER_SIZE: usize = 128;
 
 pub const MESSAGE_START_BYTE: u8 = 0xCC;
 
