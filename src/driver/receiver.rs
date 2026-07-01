@@ -9,7 +9,7 @@ use crate::{
         SYNC_SEQUENCE_BIT_LENGTH,
     },
     data_coding::radio_head_4b6b::{RunningDecoder, RunningDecoderError},
-    driver::receiver::ReceiverError::DecoderError,
+    driver::{pll::Pll, receiver::ReceiverError::DecoderError},
 };
 
 #[derive(Debug, uDebug, Clone, Copy)]
@@ -30,12 +30,10 @@ pub struct Receiver<const TICKS_PER_BIT: u8, Pin: InputPin> {
     state: RxState,
     pub pin: Pin,
     ticks: u8,
-    /// How many ticks in a bit where 1
-    n1s_in_bit: u8,
     current_byte: u8,
-    last_pin_state: bool,
 
     decoder: RunningDecoder,
+    pll: Pll<TICKS_PER_BIT>,
 }
 
 impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
@@ -45,12 +43,11 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
             bit_index: 0,
             state: RxState::Idle,
             ticks: 0,
-            n1s_in_bit: 0,
             pin,
             current_byte: 0,
             buffer_byte_index: 0,
             decoder: RunningDecoder::new(),
-            last_pin_state: false,
+            pll: Pll::new(),
         }
     }
 
@@ -61,65 +58,35 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
     pub fn cleanup(&mut self) {
         self.bit_index = 0;
         self.ticks = 0;
-        self.n1s_in_bit = 0;
         self.state = RxState::Idle;
         self.current_byte = 0;
         self.decoder.reset();
         self.buffer_byte_index = 0;
+        self.pll.clear();
     }
 
     fn get_pin_state(&self) -> bool {
         self.pin.is_high().unwrap_or(false)
     }
 
-    /// Reads rx state, increments `ticks`
-    /// and when `ticks` reaches `TICKS_PER_BIT`
-    /// returns a bit, otherwise returns `None`
-    fn get_bit(&mut self) -> Option<u8> {
-        let current = self.get_pin_state();
-        let edge_detected = current != self.last_pin_state;
-        self.last_pin_state = current;
-
-        self.ticks += 1;
-
-        if edge_detected {
-            // An edge means we're at a bit boundary.
-            // Restart the window so we sample in the middle next time.
-            self.ticks = 1;
-            self.n1s_in_bit = 0;
-            return None;
-        }
-
-        if current {
-            self.n1s_in_bit += 1;
-        }
-
-        if self.ticks >= TICKS_PER_BIT {
-            self.ticks = 0;
-            let is_one = self.n1s_in_bit > TICKS_PER_BIT / 2;
-            self.n1s_in_bit = 0;
-            Some(is_one as u8)
-        } else {
-            None
-        }
-    }
-
     /// Returns read bytes if message is ready,
     /// or None if it's not. If receiver is idle
     /// starts receiving
     pub fn receive(&mut self) -> Result<&[u8], ReceiverError> {
+        let pin_state = self.get_pin_state();
+        let bit = self.pll.tick(pin_state);
+
         match self.state {
             RxState::Idle => self.state = RxState::WaitingForOne,
             RxState::WaitingForOne => {
                 // If one detected move to the next state
-                if self.get_pin_state() {
+                if pin_state {
                     self.state = RxState::Syncing;
                     // Tick was already from the transmitter's sync sequence
-                    self.n1s_in_bit += 1;
                     self.ticks += 1;
                 }
             }
-            RxState::Syncing => match self.sync() {
+            RxState::Syncing => match self.sync(bit) {
                 // Move to the next state
                 Ok(true) => self.state = RxState::WaitingForStartByte,
                 // Wait for more bits
@@ -130,7 +97,7 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
                     return Err(err);
                 }
             },
-            RxState::WaitingForStartByte => match self.wait_start_byte() {
+            RxState::WaitingForStartByte => match self.wait_start_byte(bit) {
                 Ok(true) => self.state = RxState::ReadingSize,
                 Ok(false) => {}
                 Err(err) => {
@@ -138,7 +105,7 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
                     return Err(err);
                 }
             },
-            RxState::ReadingSize => match self.read_message_size() {
+            RxState::ReadingSize => match self.read_message_size(bit) {
                 Ok((true, size)) => {
                     if size as usize > MAX_MESSAGE_LENGTH {
                         return Err(ReceiverError::MessageTooLong);
@@ -151,14 +118,16 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
                     return Err(err);
                 }
             },
-            RxState::ReadingMessage { message_size } => match self.read_message(message_size) {
-                Ok(true) => self.state = RxState::MessageReceived { message_size },
-                Ok(false) => {}
-                Err(err) => {
-                    self.cleanup();
-                    return Err(err);
+            RxState::ReadingMessage { message_size } => {
+                match self.read_message(message_size, bit) {
+                    Ok(true) => self.state = RxState::MessageReceived { message_size },
+                    Ok(false) => {}
+                    Err(err) => {
+                        self.cleanup();
+                        return Err(err);
+                    }
                 }
-            },
+            }
             RxState::MessageReceived { message_size } => {
                 self.cleanup();
                 return Ok(&self.buffer[..message_size as usize]);
@@ -172,9 +141,9 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
     /// If bits are not alternating return `SyncError`,
     /// if not enought bits are present to sync return `false`,
     /// otherwise return `true`
-    fn sync(&mut self) -> Result<bool, ReceiverError> {
+    fn sync(&mut self, bit: Option<u8>) -> Result<bool, ReceiverError> {
         // Get bit from ticks
-        let Some(state) = self.get_bit() else {
+        let Some(state) = bit else {
             return Ok(false);
         };
 
@@ -203,8 +172,8 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
     /// Wait for a byte, if it's a `MESSAGE_START_BYTE`
     /// return `true`, if it's not return `Err(WrongStartByte)`.
     /// If byte is not complete return `false`
-    fn wait_start_byte(&mut self) -> Result<bool, ReceiverError> {
-        let Some(bit) = self.get_bit() else {
+    fn wait_start_byte(&mut self, bit: Option<u8>) -> Result<bool, ReceiverError> {
+        let Some(bit) = bit else {
             return Ok(false);
         };
 
@@ -230,8 +199,8 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
     /// nibbles, when not finished returns `(false, _)`, and when
     /// decoder is unable to decode a nibble returns
     /// `ReceiverError::DecoderError`
-    fn read_message_size(&mut self) -> Result<(bool, u8), ReceiverError> {
-        let Some(bit) = self.get_bit() else {
+    fn read_message_size(&mut self, bit: Option<u8>) -> Result<(bool, u8), ReceiverError> {
+        let Some(bit) = bit else {
             return Ok((false, 0));
         };
 
@@ -261,8 +230,8 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
         Ok((false, 0))
     }
 
-    fn read_message(&mut self, message_size: u8) -> Result<bool, ReceiverError> {
-        let Some(bit) = self.get_bit() else {
+    fn read_message(&mut self, message_size: u8, bit: Option<u8>) -> Result<bool, ReceiverError> {
+        let Some(bit) = bit else {
             return Ok(false);
         };
 
@@ -297,7 +266,7 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
     }
 }
 
-#[derive(Debug, uDebug)]
+#[derive(Debug, uDebug, PartialEq, Eq)]
 pub enum ReceiverError {
     /// Not an error per se, but an information
     MessageNotReady,
