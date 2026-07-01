@@ -12,8 +12,8 @@ use crate::{
     driver::receiver::ReceiverError::DecoderError,
 };
 
-#[derive(Debug, uDebug)]
-enum RxState {
+#[derive(Debug, uDebug, Clone, Copy)]
+pub enum RxState {
     Idle,
     WaitingForOne,
     Syncing,
@@ -33,6 +33,7 @@ pub struct Receiver<const TICKS_PER_BIT: u8, Pin: InputPin> {
     /// How many ticks in a bit where 1
     n1s_in_bit: u8,
     current_byte: u8,
+    last_pin_state: bool,
 
     decoder: RunningDecoder,
 }
@@ -49,7 +50,12 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
             current_byte: 0,
             buffer_byte_index: 0,
             decoder: RunningDecoder::new(),
+            last_pin_state: false,
         }
+    }
+
+    pub fn state(&self) -> RxState {
+        self.state
     }
 
     pub fn cleanup(&mut self) {
@@ -70,20 +76,29 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
     /// and when `ticks` reaches `TICKS_PER_BIT`
     /// returns a bit, otherwise returns `None`
     fn get_bit(&mut self) -> Option<u8> {
-        if self.get_pin_state() {
-            self.n1s_in_bit += 1;
-        }
+        let current = self.get_pin_state();
+        let edge_detected = current != self.last_pin_state;
+        self.last_pin_state = current;
 
         self.ticks += 1;
 
+        if edge_detected {
+            // An edge means we're at a bit boundary.
+            // Restart the window so we sample in the middle next time.
+            self.ticks = 1;
+            self.n1s_in_bit = 0;
+            return None;
+        }
+
+        if current {
+            self.n1s_in_bit += 1;
+        }
+
         if self.ticks >= TICKS_PER_BIT {
             self.ticks = 0;
-
-            // Bit is one if more than half of ticks where one
-            let is_bit_one = self.n1s_in_bit > (TICKS_PER_BIT / 2);
+            let is_one = self.n1s_in_bit > TICKS_PER_BIT / 2;
             self.n1s_in_bit = 0;
-
-            Some(is_bit_one as u8)
+            Some(is_one as u8)
         } else {
             None
         }
