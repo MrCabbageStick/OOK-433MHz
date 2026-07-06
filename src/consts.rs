@@ -5,7 +5,7 @@ pub const MAX_BUFFER_SIZE: usize = 128;
 pub const MESSAGE_START_BYTE: u8 = 0xCC;
 
 /// Alternating 1s and 0s
-pub const SYNC_SEQUENCE: [u8; 2] = [0xAA, 0xAA];
+pub const SYNC_SEQUENCE: [u8; 2] = [0x55, 0x55];
 
 /// Alternating 1s ond 0s
 pub const SYNC_BYTE: u8 = 0x55;

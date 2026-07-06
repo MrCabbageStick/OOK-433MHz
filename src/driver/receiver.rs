@@ -282,9 +282,7 @@ mod tests {
     use embedded_hal::digital::v2::OutputPin;
 
     use crate::{
-        consts::{
-            MESSAGE_OFFSET, MESSAGE_START_BYTE, SYNC_BYTE, SYNC_SEQUENCE, SYNC_SEQUENCE_BIT_LENGTH,
-        },
+        consts::{MESSAGE_START_BYTE, SYNC_SEQUENCE, SYNC_SEQUENCE_BIT_LENGTH},
         data_coding::radio_head_4b6b::encode_in_place,
         driver::receiver::{Receiver, ReceiverError, RxState},
         mock_pin::MockPin,
