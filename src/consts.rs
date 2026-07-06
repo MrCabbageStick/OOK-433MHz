@@ -5,13 +5,14 @@ pub const MAX_BUFFER_SIZE: usize = 128;
 pub const MESSAGE_START_BYTE: u8 = 0xCC;
 
 /// Alternating 1s and 0s
-pub const SYNC_SEQUENCE: [u8; 2] = [0x55, 0x55];
+pub const SYNC_SEQUENCE: [u8; 3] = [0x55, 0x55, 0x55];
 
 /// Alternating 1s ond 0s
 pub const SYNC_BYTE: u8 = 0x55;
 
 /// Number of bits in sync signal needed to successfully sync
-pub const SYNC_SEQUENCE_BIT_LENGTH: u8 = 2 * 8;
+pub const SYNC_SEQUENCE_BIT_LENGTH: u8 = 3 * 8;
+pub const SYNC_SEQUENCE_RECEIVER_BIT_LENGTH: u8 = 2 * 8;
 
 // SYNC_BYTE SYNC_BYTE MESSAGE_START
 // 10101010  10101010  11001100

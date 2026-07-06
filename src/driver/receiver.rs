@@ -1,15 +1,13 @@
-use core::{error::Error, fmt::Display};
-
 use embedded_hal::digital::v2::InputPin;
 use ufmt::derive::uDebug;
 
 use crate::{
     consts::{
-        MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, MESSAGE_OFFSET, MESSAGE_START_BYTE,
-        SYNC_SEQUENCE_BIT_LENGTH,
+        MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, MESSAGE_START_BYTE, SYNC_SEQUENCE_BIT_LENGTH,
+        SYNC_SEQUENCE_RECEIVER_BIT_LENGTH,
     },
     data_coding::radio_head_4b6b::{RunningDecoder, RunningDecoderError},
-    driver::{pll::Pll, receiver::ReceiverError::DecoderError},
+    driver::pll::Pll,
 };
 
 #[derive(Debug, uDebug, Clone, Copy)]
@@ -156,7 +154,7 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
         self.current_byte = state;
         self.bit_index += 1;
 
-        if self.bit_index as u8 >= SYNC_SEQUENCE_BIT_LENGTH {
+        if self.bit_index as u8 >= SYNC_SEQUENCE_RECEIVER_BIT_LENGTH {
             // Cleanup
             self.bit_index = 0;
             self.current_byte = 0;
@@ -179,6 +177,13 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
 
         self.current_byte |= bit << self.bit_index;
         self.bit_index += 1;
+
+        // Check if 2 first bits are not the rest of sync sequence
+        if self.bit_index == 2 && self.current_byte & 0b11 == 0b01 {
+            self.current_byte = 0;
+            self.bit_index = 0;
+            return Ok(false);
+        }
 
         if self.bit_index >= 8 {
             if self.current_byte != MESSAGE_START_BYTE {
@@ -282,7 +287,7 @@ mod tests {
     use embedded_hal::digital::v2::OutputPin;
 
     use crate::{
-        consts::{MESSAGE_START_BYTE, SYNC_SEQUENCE, SYNC_SEQUENCE_BIT_LENGTH},
+        consts::{MESSAGE_START_BYTE, SYNC_BYTE, SYNC_SEQUENCE, SYNC_SEQUENCE_BIT_LENGTH},
         data_coding::radio_head_4b6b::encode_in_place,
         driver::receiver::{Receiver, ReceiverError, RxState},
         mock_pin::MockPin,
@@ -416,6 +421,29 @@ mod tests {
         assert!(
             matches!(driver.state, RxState::Idle),
             "Driver not cleaned up after message start byte error"
+        );
+    }
+
+    #[test]
+    fn longer_sync_sequence() {
+        let mut driver = get_default_receiver();
+        driver.state = RxState::WaitingForStartByte;
+
+        let bits = ((MESSAGE_START_BYTE as u16) << 8) | SYNC_BYTE as u16;
+
+        for bit_i in 0..16 {
+            let bit = (bits >> bit_i) & 0x1 == 1;
+
+            driver.pin.set_state(bit.into());
+            match tick_one_bit(&mut driver) {
+                Ok(_) => {}
+                Err(err) => panic!("Error while ticking bit {bit_i}: {err:?}"),
+            }
+        }
+
+        assert!(
+            !matches!(driver.state, RxState::WaitingForStartByte),
+            "Driver not moved to the next state from `RxState::WaitingForStartByte`"
         );
     }
 
