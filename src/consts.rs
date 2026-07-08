@@ -12,7 +12,7 @@ pub const SYNC_BYTE: u8 = 0x55;
 
 /// Number of bits in sync signal needed to successfully sync
 pub const SYNC_SEQUENCE_BIT_LENGTH: u8 = 3 * 8;
-pub const SYNC_SEQUENCE_RECEIVER_BIT_LENGTH: u8 = 2 * 8;
+pub const SYNC_SEQUENCE_RECEIVER_BIT_LENGTH: u8 = 1 * 8;
 
 // SYNC_BYTE SYNC_BYTE MESSAGE_START
 // 10101010  10101010  11001100
