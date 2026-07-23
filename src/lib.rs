@@ -3,6 +3,7 @@
 pub mod consts;
 pub mod data_coding;
 pub mod driver;
+pub mod misc;
 pub mod mock_pin;
 
 #[cfg(test)]

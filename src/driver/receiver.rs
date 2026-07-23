@@ -3,11 +3,11 @@ use ufmt::derive::uDebug;
 
 use crate::{
     consts::{
-        MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, MESSAGE_START_BYTE, SYNC_SEQUENCE_BIT_LENGTH,
-        SYNC_SEQUENCE_RECEIVER_BIT_LENGTH,
+        MAX_BUFFER_SIZE, MAX_MESSAGE_LENGTH, MESSAGE_START_BYTE, SYNC_SEQUENCE_RECEIVER_BIT_LENGTH,
     },
     data_coding::radio_head_4b6b::{RunningDecoder, RunningDecoderError},
     driver::pll::Pll,
+    misc::ThreeStateResult,
 };
 
 #[derive(Debug, uDebug, Clone, Copy)]
@@ -85,42 +85,44 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
                 }
             }
             RxState::Syncing => match self.sync(bit) {
-                // Move to the next state
-                Ok(true) => self.state = RxState::WaitingForStartByte,
                 // Wait for more bits
-                Ok(false) => {}
+                ThreeStateResult::NotReady => {}
+                // Move to the next state
+                ThreeStateResult::Ok(_) => self.state = RxState::WaitingForStartByte,
                 // Failed
-                Err(err) => {
+                ThreeStateResult::Err(err) => {
                     self.cleanup();
                     return Err(err);
                 }
             },
             RxState::WaitingForStartByte => match self.wait_start_byte(bit) {
-                Ok(true) => self.state = RxState::ReadingSize,
-                Ok(false) => {}
-                Err(err) => {
+                ThreeStateResult::NotReady => {}
+                ThreeStateResult::Ok(_) => self.state = RxState::ReadingSize,
+                ThreeStateResult::Err(err) => {
                     self.cleanup();
                     return Err(err);
                 }
             },
             RxState::ReadingSize => match self.read_message_size(bit) {
-                Ok((true, size)) => {
+                ThreeStateResult::NotReady => {}
+                ThreeStateResult::Ok(size) => {
                     if size as usize > MAX_MESSAGE_LENGTH {
                         return Err(ReceiverError::MessageTooLong);
                     }
                     self.state = RxState::ReadingMessage { message_size: size };
                 }
-                Ok((false, _)) => {}
-                Err(err) => {
+                ThreeStateResult::Err(err) => {
                     self.cleanup();
                     return Err(err);
                 }
             },
             RxState::ReadingMessage { message_size } => {
                 match self.read_message(message_size, bit) {
-                    Ok(true) => self.state = RxState::MessageReceived { message_size },
-                    Ok(false) => {}
-                    Err(err) => {
+                    ThreeStateResult::NotReady => {}
+                    ThreeStateResult::Ok(_) => {
+                        self.state = RxState::MessageReceived { message_size }
+                    }
+                    ThreeStateResult::Err(err) => {
                         self.cleanup();
                         return Err(err);
                     }
@@ -139,16 +141,16 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
     /// If bits are not alternating return `SyncError`,
     /// if not enought bits are present to sync return `false`,
     /// otherwise return `true`
-    fn sync(&mut self, bit: Option<u8>) -> Result<bool, ReceiverError> {
+    fn sync(&mut self, bit: Option<u8>) -> ThreeStateResult<(), ReceiverError> {
         // Get bit from ticks
         let Some(state) = bit else {
-            return Ok(false);
+            return ThreeStateResult::NotReady;
         };
 
         // If current state is the same as previuos one
         // return an error
         if self.current_byte == state {
-            return Err(ReceiverError::SyncError);
+            return ThreeStateResult::Err(ReceiverError::SyncError);
         }
 
         self.current_byte = state;
@@ -160,19 +162,19 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
             self.current_byte = 0;
 
             // Is synced
-            Ok(true)
+            ThreeStateResult::Ok(())
         } else {
             // Not synced yet
-            Ok(false)
+            ThreeStateResult::NotReady
         }
     }
 
     /// Wait for a byte, if it's a `MESSAGE_START_BYTE`
     /// return `true`, if it's not return `Err(WrongStartByte)`.
     /// If byte is not complete return `false`
-    fn wait_start_byte(&mut self, bit: Option<u8>) -> Result<bool, ReceiverError> {
+    fn wait_start_byte(&mut self, bit: Option<u8>) -> ThreeStateResult<(), ReceiverError> {
         let Some(bit) = bit else {
-            return Ok(false);
+            return ThreeStateResult::NotReady;
         };
 
         self.current_byte |= bit << self.bit_index;
@@ -182,21 +184,21 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
         if self.bit_index == 2 && self.current_byte & 0b11 == 0b01 {
             self.current_byte = 0;
             self.bit_index = 0;
-            return Ok(false);
+            return ThreeStateResult::NotReady;
         }
 
         if self.bit_index >= 8 {
             if self.current_byte != MESSAGE_START_BYTE {
-                return Err(ReceiverError::WrongStartByte);
+                return ThreeStateResult::Err(ReceiverError::WrongStartByte);
             }
 
             self.current_byte = 0;
             self.bit_index = 0;
 
-            return Ok(true);
+            return ThreeStateResult::Ok(());
         }
 
-        Ok(false)
+        ThreeStateResult::NotReady
     }
 
     /// Read message size from 2 incoming 6-bit nibbles.
@@ -204,9 +206,9 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
     /// nibbles, when not finished returns `(false, _)`, and when
     /// decoder is unable to decode a nibble returns
     /// `ReceiverError::DecoderError`
-    fn read_message_size(&mut self, bit: Option<u8>) -> Result<(bool, u8), ReceiverError> {
+    fn read_message_size(&mut self, bit: Option<u8>) -> ThreeStateResult<u8, ReceiverError> {
         let Some(bit) = bit else {
-            return Ok((false, 0));
+            return ThreeStateResult::NotReady;
         };
 
         self.current_byte |= bit << self.bit_index;
@@ -221,23 +223,27 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
 
             match decoder_res {
                 Err(RunningDecoderError::ByteNotReady) => {
-                    return Ok((false, 0));
+                    return ThreeStateResult::NotReady;
                 }
                 Err(err) => {
-                    return Err(ReceiverError::DecoderError(err));
+                    return ThreeStateResult::Err(ReceiverError::DecoderError(err));
                 }
                 Ok(byte) => {
-                    return Ok((true, byte));
+                    return ThreeStateResult::Ok(byte);
                 }
             }
         }
 
-        Ok((false, 0))
+        ThreeStateResult::NotReady
     }
 
-    fn read_message(&mut self, message_size: u8, bit: Option<u8>) -> Result<bool, ReceiverError> {
+    fn read_message(
+        &mut self,
+        message_size: u8,
+        bit: Option<u8>,
+    ) -> ThreeStateResult<(), ReceiverError> {
         let Some(bit) = bit else {
-            return Ok(false);
+            return ThreeStateResult::NotReady;
         };
 
         self.current_byte |= bit << self.bit_index;
@@ -252,22 +258,22 @@ impl<Pin: InputPin, const TICKS_PER_BIT: u8> Receiver<TICKS_PER_BIT, Pin> {
 
             match decoder_res {
                 Err(RunningDecoderError::ByteNotReady) => {
-                    return Ok(false);
+                    return ThreeStateResult::NotReady;
                 }
-                Err(err) => return Err(ReceiverError::DecoderError(err)),
+                Err(err) => return ThreeStateResult::Err(ReceiverError::DecoderError(err)),
                 Ok(byte) => {
                     self.buffer[self.buffer_byte_index] = byte;
                     self.buffer_byte_index += 1;
 
                     if self.buffer_byte_index >= message_size as usize {
                         self.buffer_byte_index = 0;
-                        return Ok(true);
+                        return ThreeStateResult::Ok(());
                     }
                 }
             }
         }
 
-        Ok(false)
+        ThreeStateResult::NotReady
     }
 }
 

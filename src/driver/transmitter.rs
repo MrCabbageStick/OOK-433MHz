@@ -183,7 +183,7 @@ impl<Pin: OutputPin, const TICKS_PER_BIT: u8> Transmitter<TICKS_PER_BIT, Pin> {
         self.buffer[0] = n_bytes as u8;
         // Populate buffer
         self.buffer[1..=n_bytes].copy_from_slice(&bytes[0..n_bytes]);
-
+        // (message size + byte for length) * encoded nibble size * nibbles per byte
         self.message_bit_length = (n_bytes + 1) * 6 * 2;
 
         // Encode data
@@ -204,7 +204,7 @@ mod tests {
 
     use crate::{
         consts::{MESSAGE_OFFSET, MESSAGE_START_BYTE, SYNC_BYTE, SYNC_SEQUENCE_BIT_LENGTH},
-        data_coding::radio_head_4b6b::{RunningDecoder, RunningDecoderError, decode_in_place},
+        data_coding::radio_head_4b6b::decode_in_place,
         mock_pin::MockPin,
     };
 
@@ -234,16 +234,16 @@ mod tests {
     }
 
     /// Collect `n_bits` worth of bit periods into a byte (LSB first).
-    fn collect_bits(
-        driver: &mut Transmitter<TICKS_PER_BIT, MockPin>,
-        n_bits: usize,
-    ) -> Vec<bool, 64> {
-        let mut bits = Vec::new();
-        for _ in 0..n_bits {
-            bits.push(tick_one_bit(driver)).unwrap();
-        }
-        bits
-    }
+    // fn collect_bits(
+    //     driver: &mut Transmitter<TICKS_PER_BIT, MockPin>,
+    //     n_bits: usize,
+    // ) -> Vec<bool, 64> {
+    //     let mut bits = Vec::new();
+    //     for _ in 0..n_bits {
+    //         bits.push(tick_one_bit(driver)).unwrap();
+    //     }
+    //     bits
+    // }
 
     fn bits_to_byte_lsb(bits: &[bool]) -> u8 {
         assert!(bits.len() <= 8);
